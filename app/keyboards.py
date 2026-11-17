@@ -94,3 +94,30 @@ def back_to_menu_kb():
     return InlineKeyboardMarkup(inline_keyboard=[
         [InlineKeyboardButton(text="🏠 В меню", callback_data="go_menu")]
     ])
+
+# ========== АДМИН-МЕНЮ ==========
+
+def admin_menu_kb():
+    return InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text="📊 Статистика", callback_data="adm_stats")],
+        [InlineKeyboardButton(text="🚨 Жалобы", callback_data="adm_reports_0")],
+        [InlineKeyboardButton(text="🧹 Очистить БД", callback_data="adm_clear_db")],
+        [InlineKeyboardButton(text="❌ Закрыть", callback_data="adm_close")]
+    ])
+
+def admin_back_kb():
+    return InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text="⬅️ Назад", callback_data="adm_menu")]
+    ])
+
+def admin_clear_confirm1_kb():
+    return InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text="⚠️ Я уверен, продолжить", callback_data="adm_clear_step2")],
+        [InlineKeyboardButton(text="❌ Отмена", callback_data="adm_menu")]
+    ])
+
+def admin_clear_confirm2_kb():
+    return InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text="💀 УДАЛИТЬ ВСЁ ОКОНЧАТЕЛЬНО", callback_data="adm_clear_final")],
+        [InlineKeyboardButton(text="❌ Отмена", callback_data="adm_menu")]
+    ])
