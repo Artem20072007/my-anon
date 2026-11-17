@@ -6,7 +6,7 @@ def gender_kb():
 
 def target_kb():
     return ReplyKeyboardMarkup(keyboard=[
-        [KeyboardButton(text="С девушками"), KeyboardButton(text="С парнями")], 
+        [KeyboardButton(text="С девушками"), KeyboardButton(text="С парнями")],
         [KeyboardButton(text="Без разницы")]
     ], resize_keyboard=True)
 
@@ -30,7 +30,7 @@ def photo_edit_kb():
 
 def confirm_kb():
     return ReplyKeyboardMarkup(keyboard=[
-        [KeyboardButton(text="✅ Да, все верно")], 
+        [KeyboardButton(text="✅ Да, все верно")],
         [KeyboardButton(text="✏️ Изменить анкету")],
         [KeyboardButton(text="Отмена")]
     ], resize_keyboard=True)
@@ -62,13 +62,17 @@ def feed_kb(target_id: int):
         [InlineKeyboardButton(text="❤️", callback_data=f"like:{target_id}"),
          InlineKeyboardButton(text="👎", callback_data=f"dislike:{target_id}")],
         [InlineKeyboardButton(text="💤 Скрыть", callback_data="sleep"),
-         InlineKeyboardButton(text="↩️ Отменить", callback_data="undo")]
+         InlineKeyboardButton(text="↩️ Отменить", callback_data="undo")],
+        [InlineKeyboardButton(text="🚨 Жалоба", callback_data=f"report:{target_id}"),
+         InlineKeyboardButton(text="🚫 Блок", callback_data=f"block:{target_id}")]
     ])
 
 def incoming_kb(target_id: int):
     return InlineKeyboardMarkup(inline_keyboard=[
         [InlineKeyboardButton(text="💚 Ответить взаимностью", callback_data=f"like_back:{target_id}")],
-        [InlineKeyboardButton(text="➡️ Пропустить", callback_data=f"skip:{target_id}")]
+        [InlineKeyboardButton(text="➡️ Пропустить", callback_data=f"skip:{target_id}")],
+        [InlineKeyboardButton(text="🚨 Жалоба", callback_data=f"report:{target_id}"),
+         InlineKeyboardButton(text="🚫 Блок", callback_data=f"block:{target_id}")]
     ])
 
 def edit_menu_kb():
