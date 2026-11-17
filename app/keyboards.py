@@ -34,7 +34,6 @@ def main_menu():
         [KeyboardButton(text="ℹ️ Помощь")]
     ], resize_keyboard=True)
 
-# FIX: target_id в callback_data — карточка работает после рестарта бота
 def feed_kb(target_id: int):
     return InlineKeyboardMarkup(inline_keyboard=[
         [InlineKeyboardButton(text="❤️", callback_data=f"like:{target_id}"),
@@ -95,6 +94,11 @@ def back_to_menu_kb():
         [InlineKeyboardButton(text="🏠 В меню", callback_data="go_menu")]
     ])
 
+def my_likes_kb():
+    return InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text="🏠 В меню", callback_data="go_menu")]
+    ])
+
 # ========== АДМИН-МЕНЮ ==========
 
 def admin_menu_kb():
@@ -120,9 +124,4 @@ def admin_clear_confirm2_kb():
     return InlineKeyboardMarkup(inline_keyboard=[
         [InlineKeyboardButton(text="💀 УДАЛИТЬ ВСЁ ОКОНЧАТЕЛЬНО", callback_data="adm_clear_final")],
         [InlineKeyboardButton(text="❌ Отмена", callback_data="adm_menu")]
-    ])
-
-def my_likes_kb():
-    return InlineKeyboardMarkup(inline_keyboard=[
-        [InlineKeyboardButton(text="🏠 В меню", callback_data="go_menu")]
     ])
