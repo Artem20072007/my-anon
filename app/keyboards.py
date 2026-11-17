@@ -48,7 +48,6 @@ def profile_menu_kb():
     return ReplyKeyboardMarkup(keyboard=[
         [KeyboardButton(text="🔙 Вернуться назад")],
         [KeyboardButton(text="✏️ Изменить информацию")],
-        [KeyboardButton(text="⭐ Премиум")],
         [KeyboardButton(text="🎂 Фильтр возраста")],
         [KeyboardButton(text="🚻 Кого показывать")],
         [KeyboardButton(text="📍 Мой город")],
