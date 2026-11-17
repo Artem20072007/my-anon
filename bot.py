@@ -24,7 +24,6 @@ MAX_AGE = 99
 CITY = "Чистополь"
 
 conn = None
-
 user_photos = {}
 likes_state = {}
 STOP_WORDS = ["член", "секс", "анал", "интим", "пошлый", "ебаться"]
@@ -333,6 +332,10 @@ async def main():
         await render_incoming(m, m.from_user.id, 0)
 
     # ---------- ОБРАБОТКА REPLY-КНОПОК ПРОФИЛЯ ----------
+    @dp.message(F.text == "🔙 Вернуться назад")
+    async def prof_back(m: Message):
+        await m.answer("🏠 Главное меню:", reply_markup=main_menu())
+
     @dp.message(F.text == "✏️ Изменить информацию")
     async def prof_edit_info(m: Message):
         await m.answer("✏️ Что хочешь изменить?", reply_markup=edit_menu_kb())
@@ -605,7 +608,7 @@ async def main():
         await callback.message.answer(f"✅ Фильтр: от {mn} до {mx} лет.", reply_markup=main_menu())
         await safe_answer(callback)
 
-    # ---------- РЕДАКТИРОВАНИЕ ПРОФИЛЯ ----------
+    # ---------- РЕДАКТИРОВАНИЕ ПРОФИЛЯ (ИСПРАВЛЕНЫ ФОТО) ----------
     @dp.callback_query(F.data == "edit_name")
     async def cb_edit_name(callback: CallbackQuery, state: FSMContext):
         await state.set_state(EditProfile.name)
@@ -661,6 +664,17 @@ async def main():
         await safe_delete(callback.message)
         await callback.message.answer("Отправь новые фото (до 3-х).", reply_markup=photo_edit_kb())
         await safe_answer(callback)
+
+    # --- ИСПРАВЛЕНО: Обработчики кнопок редактирования фото ---
+    @dp.message(EditProfile.photo, F.text == "Оставить текущее")
+    async def edit_photo_keep(m: Message, state: FSMContext):
+        uid = m.from_user.id
+        old_u = await db.get_user(conn, uid)
+        if old_u and old_u["photos"]:
+            user_photos[uid] = old_u["photos"].split(",")
+            await m.answer(f"Оставлено текущее фото. Можешь добавить ещё или нажми «Сохранить фото».", reply_markup=photo_edit_kb())
+        else:
+            await m.answer("У тебя не было фото. Отправь новое.", reply_markup=photo_edit_kb())
 
     @dp.message(EditProfile.photo, F.photo)
     async def save_new_photo(m: Message, state: FSMContext):
