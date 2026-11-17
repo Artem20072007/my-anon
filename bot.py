@@ -71,17 +71,17 @@ async def show_profile(message: Message, p, mode="feed", extra_kb=None):
         markup = incoming_kb(p["user_id"])
     elif mode == "mine":
         markup = edit_profile_kb()
-    elif mode == "liked":
-        markup = liked_kb(user_link(p))
-    elif mode == "my_likes":            # ИСПРАВЛЕНО
-        markup = my_likes_kb()          # ИСПРАВЛЕНО
+    elif mode == "match":
+        markup = InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text="💬 Написать", url=user_link(p))]])
+    elif mode == "my_likes":
+        markup = my_likes_kb()
     else:
         markup = extra_kb
         
     caption = profile_caption(p)
     photos = p["photos"].split(",") if ("photos" in p.keys() and p["photos"]) else []
     if photos:
-        if mode in ("feed", "incoming", "liked") or len(photos) == 1:
+        if mode in ("feed", "incoming", "match") or len(photos) == 1:
             await message.answer_photo(photos[0], caption=caption, reply_markup=markup)
         else:
             media = [InputMediaPhoto(media=ph, caption=caption if i == 0 else None) for i, ph in enumerate(photos)]
@@ -379,15 +379,22 @@ async def main():
         reaction = action
         await safe_delete(callback.message)
         await db.add_reaction(conn, uid, target, reaction)
+        
         if reaction == "like" and await db.mutual_like(conn, uid, target):
             await db.add_match(conn, uid, target)
             other = await db.get_user(conn, target)
             me = await db.get_user(conn, uid)
-            await callback.message.answer(f"💚 Взаимная симпатия! Написать: {user_link(other)}", reply_markup=main_menu())
+            
+            # ИСПРАВЛЕНО: Показываем анкету собеседника с кнопкой "Написать"
+            await callback.message.answer("💚 <b>Взаимная симпатия!</b>\nВы понравились друг другу:", parse_mode="HTML")
+            await show_profile(callback.message, other, mode="match")
+            await callback.message.answer("🏠 Главное меню:", reply_markup=main_menu())
+            
             try:
-                await bot.send_message(target, f"💚 Взаимная симпатия! Написать: {user_link(me)}")
+                await bot.send_message(target, f"💚 <b>Взаимная симпатия!</b>\nКому-то ты понравился! Написать: {user_link(me)}", parse_mode="HTML")
             except Exception:
                 pass
+                
         me = await db.get_user(conn, uid)
         p = await db.next_profile(conn, me)
         if p: await show_profile(callback.message, p)
@@ -579,14 +586,20 @@ async def main():
         matched = await db.like_back(conn, uid, target)
         me = await db.get_user(conn, uid)
         await safe_delete(callback.message)
+        
         if matched:
-            await callback.message.answer(f"💚 Взаимно! Написать: {user_link(other)}", reply_markup=main_menu())
+            # ИСПРАВЛЕНО: Показываем анкету с кнопкой "Написать"
+            await callback.message.answer("💚 <b>Взаимная симпатия!</b>\nВы понравились друг другу:", parse_mode="HTML")
+            await show_profile(callback.message, other, mode="match")
+            await callback.message.answer("🏠 Главное меню:", reply_markup=main_menu())
+            
             try:
-                await bot.send_message(target, f"💚 Взаимно! Написать: {user_link(me)}")
+                await bot.send_message(target, f"💚 <b>Взаимная симпатия!</b>\nКому-то ты понравился! Написать: {user_link(me)}", parse_mode="HTML")
             except Exception:
                 pass
         else:
             await callback.message.answer("Ты лайкнул эту анкету.", reply_markup=main_menu())
+            
         await safe_answer(callback)
         st = likes_state.get(uid)
         if st:
@@ -620,7 +633,7 @@ async def main():
             return
         likes_state[uid] = {"offset": offset, "kind": "mine"}
         
-        # Вызываем режим "my_likes" с чистой клавиатурой
+        # ИСПРАВЛЕНО: Используем чистый режим без кнопки "Написать"
         await show_profile(message, rows[0], mode="my_likes")
         
         nav = likes_nav_kb(offset, total, "mylikes")
