@@ -80,10 +80,16 @@ def premium_kb():
     ])
 
 def likes_nav_kb(offset, total, prefix):
-    """Навигация по страницам для 'кто лайкнул' / 'мои лайки'."""
+    """Навигация по страницам. Всегда возвращает markup (хотя бы пустой), чтобы caller не падал."""
     row = []
     if offset > 0:
         row.append(InlineKeyboardButton(text="⬅️ Назад", callback_data=f"{prefix}_page_{offset-1}"))
     if offset + 1 < total:
         row.append(InlineKeyboardButton(text="Вперёд ➡️", callback_data=f"{prefix}_page_{offset+1}"))
     return InlineKeyboardMarkup(inline_keyboard=[row]) if row else None
+
+# FIX: отдельная клавиатура «назад в меню» для случаев, когда навигации нет
+def back_to_menu_kb():
+    return InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text="🏠 В меню", callback_data="go_menu")]
+    ])
