@@ -106,10 +106,22 @@ async def connect():
     await db.execute("PRAGMA journal_mode=WAL")
     await db.execute("PRAGMA busy_timeout=5000")
     await db.executescript(SCHEMA)
-    try:
-        await db.execute("ALTER TABLE users ADD COLUMN premium_until TEXT DEFAULT NULL")
-    except aiosqlite.OperationalError:
-        pass
+    # Безопасные миграции
+    for stmt in [
+        "ALTER TABLE users ADD COLUMN premium_until TEXT DEFAULT NULL",
+        "ALTER TABLE users ADD COLUMN is_verified INTEGER DEFAULT 0",
+        "ALTER TABLE users ADD COLUMN video_id TEXT DEFAULT ''",
+        "ALTER TABLE users ADD COLUMN referral_id INTEGER",
+    ]:
+        try:
+            await db.execute(stmt)
+        except aiosqlite.OperationalError:
+            pass
+    # 🔧 Фикс бага: старые строки после ALTER TABLE могут иметь NULL в target_age_*
+    await db.execute("UPDATE users SET target_age_min=14 WHERE target_age_min IS NULL")
+    await db.execute("UPDATE users SET target_age_max=99 WHERE target_age_max IS NULL")
+    await db.execute("UPDATE users SET is_active=1 WHERE is_active IS NULL")
+    await db.execute("UPDATE users SET is_banned=0 WHERE is_banned IS NULL")
     await db.commit()
     return db
 
@@ -128,8 +140,8 @@ async def save_user(db, data):
 
     if old:
         is_active = data.get("is_active", old["is_active"])
-        target_age_min = data.get("target_age_min", old["target_age_min"])
-        target_age_max = data.get("target_age_max", old["target_age_max"])
+        target_age_min = data.get("target_age_min", old["target_age_min"]) or 14
+        target_age_max = data.get("target_age_max", old["target_age_max"]) or 99
         referral_id = data.get("referral_id", old["referral_id"])
     else:
         is_active = 1
@@ -153,9 +165,12 @@ async def save_user(db, data):
     await db.commit()
 
 async def next_profile(db, me, exclude_seen=True):
+    if not me:
+        return None
     params = {
         "uid": me["user_id"], "city": CITY,
-        "min_age": me["target_age_min"], "max_age": me["target_age_max"],
+        "min_age": me["target_age_min"] or 14,
+        "max_age": me["target_age_max"] or 99,
         "target_gender": me["target_gender"], "gender": me["gender"]
     }
     query = '''SELECT u.* FROM users u
@@ -189,7 +204,8 @@ async def next_profile(db, me, exclude_seen=True):
     return random.choice(regular) if regular else None
 
 async def add_reaction(db, from_id, to_id, reaction):
-    if from_id == to_id: return False
+    if from_id == to_id:
+        return False
     try:
         await db.execute("INSERT INTO reactions(from_user_id,to_user_id,reaction,created_at) VALUES(?,?,?,?)",
                          (from_id, to_id, reaction, now()))
@@ -208,10 +224,14 @@ async def add_match(db, a, b):
     await db.commit()
 
 async def like_back(db, uid, target):
+    if uid == target:
+        return False
     try:
         await db.execute(
             "INSERT OR IGNORE INTO reactions(from_user_id,to_user_id,reaction,created_at) VALUES(?,?,'like',?)",
             (uid, target, now()))
+        # 🔧 Фикс: убираем из skipped, если он там был
+        await db.execute("DELETE FROM skipped_likes WHERE user_id=? AND target_id=?", (uid, target))
         cur = await db.execute(
             "SELECT 1 FROM reactions WHERE from_user_id=? AND to_user_id=? AND reaction='like'",
             (target, uid))
@@ -261,6 +281,8 @@ async def skip_incoming_like(db, uid, target_id):
         pass
 
 async def add_report(db, reporter, target, reason):
+    if reporter == target:
+        return None
     try:
         await db.execute("INSERT INTO reports(reporter_id,target_id,reason,created_at) VALUES(?,?,?,?)",
                          (reporter, target, reason, now()))
@@ -274,7 +296,8 @@ async def add_report(db, reporter, target, reason):
         return None
 
 async def block_user(db, blocker, blocked):
-    if blocker == blocked: return
+    if blocker == blocked:
+        return
     await db.execute("INSERT OR IGNORE INTO blocks(blocker_id,blocked_id,created_at) VALUES(?,?,?)",
                      (blocker, blocked, now()))
     await db.commit()
@@ -309,7 +332,8 @@ async def verify_user(db, uid):
 async def add_reward(db, uid, days):
     cur = await db.execute("SELECT premium_until FROM users WHERE user_id=?", (uid,))
     row = await cur.fetchone()
-    if not row: return
+    if not row:
+        return
     base = datetime.now(timezone.utc)
     pu = _parse_dt(row["premium_until"])
     if pu and pu > base:
@@ -338,6 +362,8 @@ async def has_like(db, from_id, to_id):
 # --- СТАТИСТИКА И РУЛЕТКА ---
 
 async def register_view(db, viewer_id, target_id):
+    if viewer_id == target_id:
+        return
     try:
         await db.execute("INSERT OR IGNORE INTO views (viewer_id, target_id, created_at) VALUES (?, ?, ?)",
                          (viewer_id, target_id, now()))
