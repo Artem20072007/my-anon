@@ -1,6 +1,6 @@
 from aiogram.types import ReplyKeyboardMarkup, KeyboardButton, InlineKeyboardMarkup, InlineKeyboardButton
 
-# --- РЕПЛАЙ-КЛАВИАТУРЫ ДЛЯ РЕГИСТРАЦИИ ---
+# --- РЕГИСТРАЦИЯ ---
 def gender_kb():
     return ReplyKeyboardMarkup(keyboard=[[KeyboardButton(text="Я девушка"), KeyboardButton(text="Я парень")]], resize_keyboard=True)
 
@@ -29,19 +29,20 @@ def photo_edit_kb():
 def confirm_kb():
     return ReplyKeyboardMarkup(keyboard=[[KeyboardButton(text="✅ Да, все верно")], [KeyboardButton(text="✏️ Изменить анкету")]], resize_keyboard=True)
 
-# --- ГЛАВНОЕ МЕНЮ (Reply, как на скрине 1) ---
+# --- ГЛАВНОЕ МЕНЮ (УБРАН ПРЕМИУМ) ---
 def main_menu():
     return ReplyKeyboardMarkup(keyboard=[
         [KeyboardButton(text="🔎 Смотреть анкеты"), KeyboardButton(text="🎲 Чат-рулетка")],
         [KeyboardButton(text="💗 Кто меня лайкнул"), KeyboardButton(text="👤 Моя анкета")],
-        [KeyboardButton(text="⭐ Премиум"), KeyboardButton(text="🔗 Пригласить друга")]
+        [KeyboardButton(text="🔗 Пригласить друга")]
     ], resize_keyboard=True)
 
-# --- МЕНЮ ПРОФИЛЯ (Reply, как на скрине 2. Вместо фото - Премиум) ---
+# --- МЕНЮ "МОЯ АНКЕТА" (Добавлена кнопка Назад, Премиум на месте) ---
 def profile_menu_kb():
     return ReplyKeyboardMarkup(keyboard=[
+        [KeyboardButton(text="🔙 Вернуться назад")],
         [KeyboardButton(text="✏️ Изменить информацию")],
-        [KeyboardButton(text="⭐ Премиум")], # <--- ВОТ ЗДЕСЬ ТЕПЕРЬ ПРЕМИУМ
+        [KeyboardButton(text="⭐ Премиум")],
         [KeyboardButton(text="🎂 Фильтр возраста")],
         [KeyboardButton(text="🚻 Кого показывать")],
         [KeyboardButton(text="📍 Мой город")],
@@ -49,7 +50,7 @@ def profile_menu_kb():
         [KeyboardButton(text="👁 Предпросмотр анкеты")]
     ], resize_keyboard=True)
 
-# --- ИНЛАЙН-КНОПКИ ДЛЯ ЛЕНТЫ И ЛАЙКОВ ---
+# --- ИНЛАЙН КНОПКИ ---
 def feed_kb(target_id: int):
     return InlineKeyboardMarkup(inline_keyboard=[
         [InlineKeyboardButton(text="❤️", callback_data=f"like:{target_id}"),
@@ -112,7 +113,7 @@ def roulette_reply_kb():
         [KeyboardButton(text="🔄 Следующий"), KeyboardButton(text="🚪 Выйти")]
     ], resize_keyboard=True)
 
-# ========== АДМИН-МЕНЮ ==========
+# --- АДМИНКА ---
 def admin_menu_kb():
     return InlineKeyboardMarkup(inline_keyboard=[
         [InlineKeyboardButton(text="📊 Статистика", callback_data="adm_stats")],
