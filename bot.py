@@ -25,10 +25,10 @@ active_cards = {}
 user_photos = {} 
 
 def user_link(user):
-    if user.get("username"):
+    if "username" in user.keys() and user["username"]:
         return f"https://t.me/{user['username']}"
     return f"tg://user?id={user['user_id']}"
-
+  
 def profile_caption(p):
     if not p or "name" not in p.keys(): return "Ошибка анкеты"
     verified = " ✅" if p["is_verified"] else ""
