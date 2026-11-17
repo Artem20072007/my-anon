@@ -1,6 +1,7 @@
 import asyncio
 import logging
 import os
+import random
 from datetime import datetime, timezone, timedelta
 from dotenv import load_dotenv
 from aiogram import Bot, Dispatcher, F, BaseMiddleware
@@ -84,6 +85,8 @@ class BanMiddleware(BaseMiddleware):
                 await event.answer("🚫 Ты заблокирован.")
             elif isinstance(event, CallbackQuery):
                 await event.answer("🚫 Ты заблокирован.", show_alert=True)
+            elif isinstance(event, PreCheckoutQuery):
+                await event.answer(ok=False, error_message="Ты заблокирован.")
             return
         return await handler(event, data)
 
@@ -109,7 +112,8 @@ async def notify_new_profiles(bot: Bot, conn):
                     if u["created_at"] > thirty_mins_ago: continue
                     try:
                         await bot.send_message(u["user_id"], f"🔔 За последние 30 минут появилось {new_count} новых анкет в {CITY}! Загляни в поиск.")
-                    except: pass
+                    except Exception:
+                        pass
         except Exception as e:
             logging.error(f"Ошибка фоновой задачи: {e}")
 
@@ -120,6 +124,7 @@ async def main():
     conn = await db.connect()
     dp.message.middleware(BanMiddleware(conn))
     dp.callback_query.middleware(BanMiddleware(conn))
+    dp.pre_checkout_query.middleware(BanMiddleware(conn))
     task = asyncio.create_task(notify_new_profiles(bot, conn))
 
     @dp.message(CommandStart())
@@ -131,9 +136,9 @@ async def main():
                 try:
                     ref_id = int(args[1].replace("ref_", ""))
                     if ref_id != m.from_user.id:
-                        if await db.set_referral(conn, m.from_user.id, ref_id):
-                            await state.update_data(pending_ref=ref_id)
-                            await m.answer("🎉 Ты пришел по приглашению друга! Создай анкету, и друг получит +3 дня Премиума.")
+                        # сохраняем в state, в БД запишем при save_user
+                        await state.update_data(pending_ref=ref_id)
+                        await m.answer("🎉 Ты пришел по приглашению друга! Создай анкету, и друг получит +3 дня Премиума.")
                 except (ValueError, TypeError) as e:
                     logging.warning(f"ref parse: {e}")
             await start_registration(m, state)
@@ -201,6 +206,9 @@ async def main():
         else:
             await m.answer("Пришли своё фото или запиши видео (до 15 сек).\nАнкеты, где видно лицо, собирают больше лайков ❤️", reply_markup=photo_kb())
 
+    def _photo_kb_for(d):
+        return photo_edit_kb() if d.get("is_edit") else photo_kb()
+
     @dp.message(Registration.photo, F.photo)
     async def reg_photo(m: Message, state: FSMContext):
         uid = m.from_user.id
@@ -210,7 +218,7 @@ async def main():
         user_photos[uid].append(m.photo[-1].file_id)
         await state.update_data(photos=user_photos[uid], video_id="")
         d = await state.get_data()
-        kb = photo_edit_kb() if d.get("is_edit") else photo_kb()
+        kb = _photo_kb_for(d)
         if len(user_photos[uid]) < 3:
             await m.answer(f"Фото добавлено ({len(user_photos[uid])}/3). Еще одно или нажми «Сохранить фото».", reply_markup=kb)
         else:
@@ -222,6 +230,7 @@ async def main():
         if m.video.duration > 15:
             return await m.answer("Видео должно быть не длиннее 15 секунд! Попробуй еще раз или пришли фото.")
         await state.update_data(video_id=m.video.file_id, photos=[])
+        user_photos.pop(m.from_user.id, None)
         await state.set_state(Registration.confirm)
         d = await state.get_data()
         await m.answer_video(video=m.video.file_id, caption=f"Проверь анкету:\n👤 {d['name']}, {d['age']}\n📍 {d['city']}\n📝 {d.get('bio') or 'Без описания'}\n\nПодтверди создание.", reply_markup=confirm_kb())
@@ -231,7 +240,7 @@ async def main():
         uid = m.from_user.id
         if uid not in user_photos or not user_photos[uid]:
             return await m.answer("Ты не добавил ни одного фото! Отправь фото.")
-        await state.update_data(photos=user_photos[uid])
+        await state.update_data(photos=user_photos[uid], video_id="")
         await state.set_state(Registration.confirm)
         d = await state.get_data()
         await m.answer_photo(photo=user_photos[uid][0], caption=f"Проверь анкету:\n👤 {d['name']}, {d['age']}\n📍 {d['city']}\n📝 {d.get('bio') or 'Без описания'}\n\nПодтверди создание.", reply_markup=confirm_kb())
@@ -253,46 +262,52 @@ async def main():
     @dp.message(Registration.photo, F.text == "Взять из профиля Telegram")
     async def reg_photo_telegram(m: Message, state: FSMContext):
         uid = m.from_user.id
+        d = await state.get_data()
+        kb = _photo_kb_for(d)
         if uid not in user_photos: user_photos[uid] = []
         if len(user_photos[uid]) >= 3:
-            return await m.answer("Ты уже добавил 3 фото. Нажми «Сохранить фото».", reply_markup=photo_kb())
+            return await m.answer("Ты уже добавил 3 фото. Нажми «Сохранить фото».", reply_markup=kb)
         try:
             photos = await bot.get_user_profile_photos(m.from_user.id, limit=1)
             if not photos.total_count:
-                return await m.answer("В твоем профиле Telegram нет фото. Отправь своё фото.", reply_markup=photo_kb())
+                return await m.answer("В твоем профиле Telegram нет фото. Отправь своё фото.", reply_markup=kb)
             file_id = photos.photos[0][-1].file_id
             if file_id in user_photos[uid]:
                 return await m.answer("Это фото уже добавлено.")
             user_photos[uid].append(file_id)
             await state.update_data(photos=user_photos[uid], video_id="")
             if len(user_photos[uid]) < 3:
-                await m.answer(f"Фото из профиля добавлено ({len(user_photos[uid])}/3). Еще одно или нажми «Сохранить фото».", reply_markup=photo_kb())
+                await m.answer(f"Фото из профиля добавлено ({len(user_photos[uid])}/3). Еще одно или нажми «Сохранить фото».", reply_markup=kb)
             else:
                 await state.set_state(Registration.confirm)
-                d = await state.get_data()
                 await m.answer_photo(photo=user_photos[uid][0], caption=f"Проверь анкету:\n👤 {d['name']}, {d['age']}\n📍 {d['city']}\n📝 {d.get('bio') or 'Без описания'}\n\nПодтверди создание.", reply_markup=confirm_kb())
         except Exception as e:
             logging.error(f"profile photo: {e}")
-            await m.answer("Не удалось получить фото из профиля. Отправь фото вручную.", reply_markup=photo_kb())
+            await m.answer("Не удалось получить фото из профиля. Отправь фото вручную.", reply_markup=kb)
 
     @dp.message(Registration.photo)
     async def reg_media_bad(m: Message, state: FSMContext):
         d = await state.get_data()
-        kb = photo_edit_kb() if d.get("is_edit") else photo_kb()
-        await m.answer("Пожалуйста, отправь фото, видео (до 15 сек) или выбери кнопку ниже.", reply_markup=kb)
+        await m.answer("Пожалуйста, отправь фото, видео (до 15 сек) или выбери кнопку ниже.", reply_markup=_photo_kb_for(d))
 
     @dp.message(Registration.confirm)
     async def reg_confirm(m: Message, state: FSMContext):
         if m.text == "✏️ Изменить анкету":
             d = await state.get_data()
-            return await start_registration(m, state, is_edit=d.get("is_edit", False))
+            # сохраняем pending_ref при перезапуске регистрации
+            pending_ref = d.get("pending_ref")
+            await start_registration(m, state, is_edit=d.get("is_edit", False))
+            if pending_ref:
+                await state.update_data(pending_ref=pending_ref)
+            return
         if m.text != "✅ Да, все верно":
             return await m.answer("Подтверди кнопкой.")
         d = await state.get_data()
         if not d.get("photos") and not d.get("video_id"):
             return await m.answer("❌ Нельзя создать анкету без фото или видео! Отправь фото или видео.")
-        # реферальная награда — только после создания анкеты
         pending_ref = d.get("pending_ref")
+        # записываем реферал в БД сразу при создании анкеты
+        d["referral_id"] = pending_ref
         await db.save_user(conn, d)
         if pending_ref:
             try:
@@ -329,7 +344,8 @@ async def main():
             await callback.message.answer(f"💚 Взаимная симпатия! Написать: {user_link(other)}", reply_markup=main_menu())
             try:
                 await bot.send_message(target, f"💚 Взаимная симпатия! Написать: {user_link(me)}")
-            except: pass
+            except Exception:
+                pass
         me = await db.get_user(conn, uid)
         p = await db.next_profile(conn, me)
         if p: await show_profile(callback.message, p)
@@ -402,26 +418,38 @@ async def main():
 
     @dp.callback_query(F.data.startswith("buy_premium_"))
     async def buy_premium(callback: CallbackQuery):
-        days = int(callback.data.split("_")[-1])
+        try:
+            days = int(callback.data.split("_")[-1])
+        except ValueError:
+            return await callback.answer("Ошибка тарифа.", show_alert=True)
         price = 50 if days == 7 else 150
         title = f"Премиум на {days} дней"
         await bot.send_invoice(chat_id=callback.from_user.id, title=title,
                                description="Доступ к скрытым функциям бота знакомств",
                                payload=f"premium_{days}", provider_token="", currency="XTR",
-                               prices=[LabeledPrice(label=title, amount=price)],
-                               start_parameter="premium")
+                               prices=[LabeledPrice(label=title, amount=price)])
         await callback.answer()
 
     @dp.pre_checkout_query()
     async def pre_checkout(query: PreCheckoutQuery):
         if not query.invoice_payload.startswith("premium_"):
             return await bot.answer_pre_checkout_query(query.id, ok=False, error_message="Неизвестный товар")
+        try:
+            days = int(query.invoice_payload.split("_")[-1])
+        except ValueError:
+            return await bot.answer_pre_checkout_query(query.id, ok=False, error_message="Неизвестный тариф")
+        expected = 50 if days == 7 else 150
+        if query.total_amount != expected:
+            return await bot.answer_pre_checkout_query(query.id, ok=False, error_message="Неверная сумма")
         await bot.answer_pre_checkout_query(query.id, ok=True)
 
     @dp.message(F.successful_payment)
     async def successful_payment(m: Message):
         payload = m.successful_payment.invoice_payload
-        days = int(payload.split("_")[-1])
+        try:
+            days = int(payload.split("_")[-1])
+        except ValueError:
+            return await m.answer("Ошибка платежа. Напиши в поддержку.")
         await db.set_premium(conn, m.from_user.id, days)
         await m.answer(f"🎉 Спасибо за покупку! Премиум активирован на {days} дней.")
 
@@ -437,6 +465,7 @@ async def main():
             await message.answer("🔒 Чтобы листать лайки, нужен Премиум.", reply_markup=premium_kb())
             return
         if offset >= total: offset = total - 1
+        if offset < 0: offset = 0
         rows = await db.incoming_likes(conn, uid, offset=offset, limit=1)
         if not rows:
             await message.answer("Больше лайков нет.", reply_markup=main_menu())
@@ -471,28 +500,38 @@ async def main():
         if not card or card[0] != "incoming":
             return await callback.answer("Ошибка.")
         target = card[1]
+        other = await db.get_user(conn, target)
+        if not other or other["is_banned"]:
+            await callback.message.delete()
+            await callback.answer("Анкета недоступна.")
+            return
         await db.add_reaction(conn, uid, target, "like")
         await db.add_match(conn, uid, target)
-        other = await db.get_user(conn, target)
         me = await db.get_user(conn, uid)
         await callback.message.delete()
         await callback.message.answer(f"💚 Взаимно! Написать: {user_link(other)}", reply_markup=main_menu())
         try:
             await bot.send_message(target, f"💚 Взаимно! Написать: {user_link(me)}")
-        except: pass
+        except Exception:
+            pass
         await callback.answer()
         st = likes_state.get(uid)
-        if st: await render_incoming(callback.message, uid, st["offset"])
+        if st:
+            await render_incoming(callback.message, uid, st["offset"])
 
     @dp.callback_query(F.data == "skip")
     async def cb_skip(callback: CallbackQuery):
         uid = callback.from_user.id
-        active_cards.pop(uid, None)
+        card = active_cards.pop(uid, None)
+        if card and card[0] == "incoming":
+            # запоминаем пропуск, чтобы анкета не возвращалась
+            await db.skip_incoming_like(conn, uid, card[1])
         await callback.message.delete()
         st = likes_state.get(uid)
         offset = st["offset"] if st else 0
-        # пропуск не удаляет реакцию — просто листаем дальше
-        await render_incoming(callback.message, uid, offset + 1)
+        # после пропуска на текущей позиции подтягивается следующая, поэтому offset не меняем
+        # если пропустили последнюю — total уменьшится, render_incoming сам скорректирует
+        await render_incoming(callback.message, uid, offset)
         await callback.answer()
 
     # ---------- Мои лайки (постранично, без редактирования) ----------
@@ -502,6 +541,7 @@ async def main():
             await message.answer("Ты пока никого не лайкнул.", reply_markup=main_menu())
             return
         if offset >= total: offset = total - 1
+        if offset < 0: offset = 0
         rows = await db.my_likes(conn, uid, offset=offset, limit=1)
         if not rows:
             await message.answer("Больше нет.", reply_markup=main_menu())
