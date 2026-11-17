@@ -64,6 +64,7 @@ async def show_profile(message: Message, p, mode="feed", extra_kb=None):
     if not p:
         await message.answer("Анкеты закончились.", reply_markup=main_menu())
         return
+        
     if mode == "feed":
         markup = feed_kb(p["user_id"])
     elif mode == "incoming":
@@ -72,8 +73,11 @@ async def show_profile(message: Message, p, mode="feed", extra_kb=None):
         markup = edit_profile_kb()
     elif mode == "liked":
         markup = liked_kb(user_link(p))
+    elif mode == "my_likes":            # ИСПРАВЛЕНО
+        markup = my_likes_kb()          # ИСПРАВЛЕНО
     else:
         markup = extra_kb
+        
     caption = profile_caption(p)
     photos = p["photos"].split(",") if ("photos" in p.keys() and p["photos"]) else []
     if photos:
@@ -616,8 +620,8 @@ async def main():
             return
         likes_state[uid] = {"offset": offset, "kind": "mine"}
         
-        # ИСПРАВЛЕНИЕ: Используем mode="feed" и простую клавиатуру вместо кнопки "Написать"
-        await show_profile(message, rows[0], mode="feed", extra_kb=my_likes_kb())
+        # Вызываем режим "my_likes" с чистой клавиатурой
+        await show_profile(message, rows[0], mode="my_likes")
         
         nav = likes_nav_kb(offset, total, "mylikes")
         header = f"❤️ Мои лайки: {offset+1} из {total}\n(Ждем ответной симпатии)"
@@ -876,18 +880,15 @@ async def main():
         msg = await callback.message.answer("⏳ Удаляю данные из БД...")
         
         try:
-            # Отключаем внешние ключи, чтобы удалить таблицы в любом порядке
             await conn.execute("PRAGMA foreign_keys=OFF")
             for table in ["reactions", "skipped_likes", "reports", "matches", "blocks", "users"]:
                 await conn.execute(f"DELETE FROM {table}")
             
-            # ВАЖНО: Коммитим удаление ДО вызова VACUUM, чтобы избежать ошибки "cannot VACUUM from within a transaction"
             await conn.commit()
             
             await conn.execute("VACUUM")
             await conn.commit()
             
-            # Очищаем оперативную память
             user_photos.clear()
             likes_state.clear()
             
@@ -932,7 +933,6 @@ async def main():
                 f"📝 Причина: {row['reason']}\n"
                 f"🕒 Дата: {row['created_at'][:19]}")
         
-        # Кнопки для действий с жалобой
         kb = InlineKeyboardMarkup(inline_keyboard=[
             [InlineKeyboardButton(text="🚫 Забанить нарушителя", callback_data=f"adm_ban:{row['target_id']}")],
             [InlineKeyboardButton(text="✅ Игнорировать", callback_data=f"adm_ignore:{row['target_id']}")],
@@ -968,7 +968,6 @@ async def main():
     async def adm_ignore(callback: CallbackQuery):
         await safe_answer(callback, "Жалоба проигнорирована.")
 
-    # Оставляем старые текстовые команды для удобства
     @dp.message(Command("verify"), F.from_user.id.in_(ADMIN_IDS))
     async def admin_verify(m: Message):
         try:
