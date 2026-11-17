@@ -160,7 +160,7 @@ async def main():
                 except Exception: pass
             await start_registration(m, state, pending_ref=pending_ref)
         else:
-            await m.answer("С возвращением! Главное меню:", reply_markup=main_menu())
+            await m.answer("С возвращением! Главное меню:", reply_markup=main_menu(), reply_markup_remove=True)
 
     @dp.message(Command("cancel"), StateFilter("*"))
     @dp.message(F.text == "Отмена", StateFilter("*"))
@@ -297,74 +297,79 @@ async def main():
             except Exception: pass
         await state.clear()
         user_photos.pop(m.from_user.id, None)
+        # Важно: убираем Reply-клавиатуру и показываем инлайн-меню
         await m.answer("Анкета готова! Главное меню:", reply_markup=main_menu())
 
-    # ---------- ОБРАБОТКА НИЖНИХ КНОПОК ----------
-    @dp.message(F.text == "🔎 Смотреть анкеты")
-    async def feed(m: Message):
-        me = await db.get_user(conn, m.from_user.id)
-        if not me: return await m.answer("Сначала создай анкету /start", reply_markup=main_menu())
-        likes_state.pop(m.from_user.id, None)
+    # ---------- ОБРАБОТКА ИНЛАЙН-КНОПОК ГЛАВНОГО МЕНЮ ----------
+    @dp.callback_query(F.data == "menu_feed")
+    async def cb_feed(callback: CallbackQuery):
+        me = await db.get_user(conn, callback.from_user.id)
+        if not me: return await safe_answer(callback, "Создай анкету /start", show_alert=True)
+        likes_state.pop(callback.from_user.id, None)
         p = await db.next_profile(conn, me)
-        if p: await show_profile(m, p)
-        else: await m.answer("Анкеты закончились. Заходи позже!", reply_markup=main_menu())
-
-    @dp.message(F.text == "👤 Моя анкета")
-    async def my_profile(m: Message):
-        u = await db.get_user(conn, m.from_user.id)
-        if not u: return await m.answer("Нет анкеты.", reply_markup=main_menu())
-        
-        stats = await db.get_profile_stats(conn, u["user_id"])
-        caption = profile_caption(u, stats)
-        photos = u["photos"].split(",") if u["photos"] else []
-        
-        if photos:
-            await m.answer_photo(photos[0], caption=caption, reply_markup=profile_menu_kb())
-        elif u["video_id"]:
-            await m.answer_video(u["video_id"], caption=caption, reply_markup=profile_menu_kb())
+        if p:
+            await safe_delete(callback.message)
+            await show_profile(callback.message, p)
         else:
-            await m.answer(caption, reply_markup=profile_menu_kb())
+            await safe_answer(callback, "Анкеты закончились!", show_alert=True)
 
-    @dp.message(F.text == "🎂 Фильтр возраста")
-    async def age_filter(m: Message):
-        me = await db.get_user(conn, m.from_user.id)
-        cur = f"Сейчас: от {me['target_age_min']} до {me['target_age_max']} лет." if me else ""
-        await m.answer(f"{cur}\n\nВыбери диапазон возрастов для поиска:", reply_markup=age_filter_kb())
-
-    @dp.message(F.text == "⭐ Премиум")
-    async def premium_menu(m: Message):
-        is_prem = await db.check_premium(conn, m.from_user.id)
-        status = "✅ У тебя активен Премиум!" if is_prem else "❌ У тебя нет Премиума."
-        text = f"{status}\n\nЧто дает Премиум:\n1. Видишь ВСЕХ, кто тебя лайкнул.\n2. Твоя анкета показывается первой.\n3. Отмена лайков.\n\nВыбери тариф:"
-        await m.answer(text, reply_markup=premium_kb())
-
-    @dp.message(F.text == "🔗 Пригласить друга")
-    async def invite_friend(m: Message):
-        bot_info = await bot.get_me()
-        ref_link = f"https://t.me/{bot_info.username}?start=ref_{m.from_user.id}"
-        await m.answer(f"Пригласи друга по этой ссылке:\n{ref_link}\n\nКогда он зарегистрируется, ты получишь +3 дня Премиума!")
-
-    @dp.message(F.text == "🌙 Сон / Поиск")
-    async def toggle(m: Message):
-        u = await db.get_user(conn, m.from_user.id)
-        if not u: return await m.answer("Сначала создай анкету /start", reply_markup=main_menu())
-        new = 0 if u["is_active"] else 1
-        await conn.execute("UPDATE users SET is_active=? WHERE user_id=?", (new, m.from_user.id))
-        await conn.commit()
-        await m.answer("Анкета скрыта 🌙" if not new else "Анкета в поиске 💚", reply_markup=main_menu())
-
-    @dp.message(F.text == "💖 Кто меня лайкнул")
-    async def likes_in(m: Message):
-        await render_incoming(m, m.from_user.id, 0)
-
-    # ---------- ИНЛАЙН-ОБРАБОТЧИКИ ДЛЯ "МОЯ АНКЕТА" ----------
     @dp.callback_query(F.data == "menu_profile")
-    async def cb_back_to_profile(callback: CallbackQuery):
-        await safe_delete(callback.message)
+    async def cb_my_profile(callback: CallbackQuery):
         u = await db.get_user(conn, callback.from_user.id)
+        if not u: return await safe_answer(callback, "Нет анкеты. Напиши /start", show_alert=True)
+        await safe_delete(callback.message)
         await show_profile(callback.message, u, mode="mine")
         await safe_answer(callback)
 
+    @dp.callback_query(F.data == "menu_likes")
+    async def cb_likes_menu(callback: CallbackQuery):
+        await safe_delete(callback.message)
+        await render_incoming(callback.message, callback.from_user.id, 0)
+        await safe_answer(callback)
+
+    @dp.callback_query(F.data == "menu_roulette")
+    async def cb_roulette_menu(callback: CallbackQuery, state: FSMContext):
+        await safe_delete(callback.message)
+        await start_roulette(callback.message, state)
+        await safe_answer(callback)
+
+    @dp.callback_query(F.data == "menu_invite")
+    async def cb_invite_menu(callback: CallbackQuery):
+        bot_info = await bot.get_me()
+        ref_link = f"https://t.me/{bot_info.username}?start=ref_{callback.from_user.id}"
+        await safe_delete(callback.message)
+        await callback.message.answer(f"🔗 Твоя ссылка для приглашения:\n{ref_link}\n\nЗа каждого друга +3 дня Премиума!", reply_markup=back_to_menu_kb())
+        await safe_answer(callback)
+
+    @dp.callback_query(F.data == "menu_age")
+    async def cb_age_menu(callback: CallbackQuery):
+        me = await db.get_user(conn, callback.from_user.id)
+        cur = f"Сейчас: от {me['target_age_min']} до {me['target_age_max']} лет." if me else ""
+        await safe_delete(callback.message)
+        await callback.message.answer(f"{cur}\n\nВыбери диапазон возрастов для поиска:", reply_markup=age_filter_kb())
+        await safe_answer(callback)
+
+    @dp.callback_query(F.data == "menu_sleep")
+    async def cb_sleep_menu(callback: CallbackQuery):
+        u = await db.get_user(conn, callback.from_user.id)
+        if not u: return await safe_answer(callback, "Нет анкеты.")
+        new = 0 if u["is_active"] else 1
+        await conn.execute("UPDATE users SET is_active=? WHERE user_id=?", (new, callback.from_user.id))
+        await conn.commit()
+        await safe_delete(callback.message)
+        await callback.message.answer(f"✅ Анкета {'скрыта 🌙' if not new else 'в поиске 💚'}", reply_markup=main_menu())
+        await safe_answer(callback)
+
+    @dp.callback_query(F.data == "menu_premium")
+    async def cb_premium_menu(callback: CallbackQuery):
+        is_prem = await db.check_premium(conn, callback.from_user.id)
+        status = "✅ У тебя активен Премиум!" if is_prem else "❌ У тебя нет Премиума."
+        text = f"{status}\n\nЧто дает Премиум:\n1. Видишь ВСЕХ, кто тебя лайкнул.\n2. Твоя анкета показывается первой.\n3. Отмена лайков.\n\nВыбери тариф:"
+        await safe_delete(callback.message)
+        await callback.message.answer(text, reply_markup=premium_kb())
+        await safe_answer(callback)
+
+    # ---------- ИНЛАЙН-МЕНЮ "МОЯ АНКЕТА" ----------
     @dp.callback_query(F.data == "prof_edit_info")
     async def cb_prof_edit_info(callback: CallbackQuery):
         await safe_delete(callback.message)
@@ -433,8 +438,7 @@ async def main():
 
     @dp.callback_query(F.data == "prof_premium")
     async def cb_prof_premium(callback: CallbackQuery):
-        await premium_menu(callback.message)
-        await safe_answer(callback)
+        await cb_premium_menu(callback)
 
     @dp.callback_query(F.data == "prof_preview")
     async def cb_prof_preview(callback: CallbackQuery):
@@ -450,7 +454,7 @@ async def main():
         await callback.message.answer("🏠 Главное меню", reply_markup=main_menu())
         await safe_answer(callback)
 
-    # ---------- ОСТАЛЬНАЯ ЛОГИКА ----------
+    # ---------- ОСТАЛЬНАЯ ЛОГИКА (Лайки, Жалобы, Анкеты) ----------
     @dp.callback_query(F.data.startswith("like:") | F.data.startswith("dislike:"))
     async def handle_reaction(callback: CallbackQuery):
         uid = callback.from_user.id
@@ -524,7 +528,6 @@ async def main():
         if p: await show_profile(callback.message, p)
 
     # ---------- ЧАТ-РУЛЕТКА ----------
-    @dp.message(F.text == "🎲 Чат-рулетка")
     async def start_roulette(m: Message, state: FSMContext):
         me = await db.get_user(conn, m.from_user.id)
         if not me: return await m.answer("Сначала создай анкету /start")
