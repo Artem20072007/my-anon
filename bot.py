@@ -12,7 +12,7 @@ from aiogram.types import (Message, CallbackQuery, InputMediaPhoto, LabeledPrice
 from aiogram.fsm.context import FSMContext
 from aiogram.fsm.storage.memory import MemoryStorage
 from app import db
-from app.states import Registration, EditProfile
+from app.states import Registration, EditProfile, AdminPanel
 from app.keyboards import *
 
 load_dotenv()
@@ -146,8 +146,10 @@ async def main():
     dp.pre_checkout_query.middleware(BanMiddleware(conn))
     task = asyncio.create_task(notify_new_profiles(bot, conn))
 
+    # ================= СТАРТ И ОТМЕНА =================
     @dp.message(CommandStart())
     async def start(m: Message, state: FSMContext):
+        await state.clear() # СБРОС СОСТОЯНИЯ
         args = m.text.split()
         user = await db.get_user(conn, m.from_user.id)
         if not user:
@@ -169,7 +171,7 @@ async def main():
         likes_state.pop(m.from_user.id, None)
         await m.answer("Действие отменено.", reply_markup=main_menu())
 
-    # ---------- Регистрация ----------
+    # ================= РЕГИСТРАЦИЯ =================
     @dp.message(Registration.gender)
     async def reg_gender(m: Message, state: FSMContext):
         val = {"Я парень":"m", "Я девушка":"f"}.get(m.text)
@@ -298,9 +300,10 @@ async def main():
         user_photos.pop(m.from_user.id, None)
         await m.answer("Анкета готова! Главное меню:", reply_markup=main_menu())
 
-    # ---------- ОБРАБОТКА REPLY-КНОПОК ГЛАВНОГО МЕНЮ ----------
+    # ================= REPLY-КНОПКИ ГЛАВНОГО МЕНЮ =================
     @dp.message(F.text == "🔎 Смотреть анкеты")
-    async def feed(m: Message):
+    async def feed(m: Message, state: FSMContext):
+        await state.clear()
         me = await db.get_user(conn, m.from_user.id)
         if not me: return await m.answer("Сначала создай анкету /start", reply_markup=main_menu())
         likes_state.pop(m.from_user.id, None)
@@ -309,45 +312,53 @@ async def main():
         else: await m.answer("Анкеты закончились. Заходи позже!", reply_markup=main_menu())
 
     @dp.message(F.text == "👤 Моя анкета")
-    async def my_profile(m: Message):
+    async def my_profile(m: Message, state: FSMContext):
+        await state.clear()
         u = await db.get_user(conn, m.from_user.id)
         if not u: return await m.answer("Нет анкеты.", reply_markup=main_menu())
         await show_profile(m, u, mode="mine")
 
     @dp.message(F.text == "⭐ Премиум")
-    async def premium_menu(m: Message):
+    async def premium_menu(m: Message, state: FSMContext):
+        await state.clear()
         is_prem = await db.check_premium(conn, m.from_user.id)
         status = "✅ У тебя активен Премиум!" if is_prem else "❌ У тебя нет Премиума."
         text = f"{status}\n\nЧто дает Премиум:\n1. Видишь ВСЕХ, кто тебя лайкнул.\n2. Твоя анкета показывается первой.\n3. Отмена лайков.\n\nВыбери тариф:"
         await m.answer(text, reply_markup=premium_kb())
 
     @dp.message(F.text == "🔗 Пригласить друга")
-    async def invite_friend(m: Message):
+    async def invite_friend(m: Message, state: FSMContext):
+        await state.clear()
         bot_info = await bot.get_me()
         ref_link = f"https://t.me/{bot_info.username}?start=ref_{m.from_user.id}"
         await m.answer(f"Пригласи друга по этой ссылке:\n{ref_link}\n\nКогда он зарегистрируется, ты получишь +3 дня Премиума!")
 
     @dp.message(F.text == "💗 Кто меня лайкнул")
-    async def likes_in(m: Message):
+    async def likes_in(m: Message, state: FSMContext):
+        await state.clear()
         await render_incoming(m, m.from_user.id, 0)
 
-    # ---------- ОБРАБОТКА REPLY-КНОПОК ПРОФИЛЯ ----------
+    # ================= REPLY-КНОПКИ ПРОФИЛЯ =================
     @dp.message(F.text == "🔙 Вернуться назад")
-    async def prof_back(m: Message):
+    async def prof_back(m: Message, state: FSMContext):
+        await state.clear() # ВАЖНО: СБРОС СОСТОЯНИЯ
         await m.answer("🏠 Главное меню:", reply_markup=main_menu())
 
     @dp.message(F.text == "✏️ Изменить информацию")
-    async def prof_edit_info(m: Message):
+    async def prof_edit_info(m: Message, state: FSMContext):
+        await state.clear() # ВАЖНО: СБРОС СОСТОЯНИЯ
         await m.answer("✏️ Что хочешь изменить?", reply_markup=edit_menu_kb())
 
     @dp.message(F.text == "🎂 Фильтр возраста")
-    async def prof_age_filter(m: Message):
+    async def prof_age_filter(m: Message, state: FSMContext):
+        await state.clear()
         me = await db.get_user(conn, m.from_user.id)
         cur = f"Сейчас: от {me['target_age_min']} до {me['target_age_max']} лет.\n\n" if me else ""
         await m.answer(f"{cur}Выбери диапазон:", reply_markup=age_filter_kb())
 
     @dp.message(F.text == "🚻 Кого показывать")
-    async def prof_target_gender(m: Message):
+    async def prof_target_gender(m: Message, state: FSMContext):
+        await state.clear()
         kb = InlineKeyboardMarkup(inline_keyboard=[
             [InlineKeyboardButton(text="Девушки", callback_data="set_tg_f"), InlineKeyboardButton(text="Парни", callback_data="set_tg_m")],
             [InlineKeyboardButton(text="Все", callback_data="set_tg_all")]
@@ -355,11 +366,13 @@ async def main():
         await m.answer("👫 Кого показывать в ленте?", reply_markup=kb)
 
     @dp.message(F.text == "📍 Мой город")
-    async def prof_city(m: Message):
+    async def prof_city(m: Message, state: FSMContext):
+        await state.clear()
         await m.answer(f"📍 Твой город: {CITY}.\n\nБот работает только в этом городе.", reply_markup=back_to_menu_kb())
 
     @dp.message(F.text == "🌙 Сон / Поиск")
-    async def prof_toggle(m: Message):
+    async def prof_toggle(m: Message, state: FSMContext):
+        await state.clear()
         u = await db.get_user(conn, m.from_user.id)
         if not u: return await m.answer("Нет анкеты.", reply_markup=main_menu())
         new = 0 if u["is_active"] else 1
@@ -368,9 +381,16 @@ async def main():
         await m.answer(f"✅ Анкета {'скрыта 🌙' if not new else 'в поиске 💚'}", reply_markup=main_menu())
 
     @dp.message(F.text == "👁 Предпросмотр анкеты")
-    async def prof_preview(m: Message):
+    async def prof_preview(m: Message, state: FSMContext):
+        await state.clear()
         u = await db.get_user(conn, m.from_user.id)
         await show_profile(m, u, mode="feed")
+
+    # ================= CALLBACKS =================
+    @dp.callback_query(F.data == "close_menu")
+    async def cb_close_menu(callback: CallbackQuery):
+        await safe_delete(callback.message)
+        await safe_answer(callback)
 
     @dp.callback_query(F.data.startswith("set_tg_"))
     async def cb_set_tg(callback: CallbackQuery):
@@ -382,13 +402,13 @@ async def main():
         await safe_answer(callback)
 
     @dp.callback_query(F.data == "go_menu")
-    async def go_menu(callback: CallbackQuery):
+    async def go_menu(callback: CallbackQuery, state: FSMContext):
+        await state.clear()
         likes_state.pop(callback.from_user.id, None)
         await safe_delete(callback.message)
         await callback.message.answer("🏠 Главное меню", reply_markup=main_menu())
         await safe_answer(callback)
 
-    # ---------- ОСТАЛЬНАЯ ЛОГИКА (Лайки, Жалобы, Анкеты) ----------
     @dp.callback_query(F.data.startswith("like:") | F.data.startswith("dislike:"))
     async def handle_reaction(callback: CallbackQuery):
         uid = callback.from_user.id
@@ -461,9 +481,10 @@ async def main():
         p = await db.next_profile(conn, me)
         if p: await show_profile(callback.message, p)
 
-    # ---------- ЧАТ-РУЛЕТКА ----------
+    # ================= РУЛЕТКА =================
     @dp.message(F.text == "🎲 Чат-рулетка")
     async def start_roulette(m: Message, state: FSMContext):
+        await state.clear()
         me = await db.get_user(conn, m.from_user.id)
         if not me: return await m.answer("Сначала создай анкету /start")
         partner_id = await db.roulette_get_partner(conn, m.from_user.id)
@@ -521,9 +542,9 @@ async def main():
             except Exception: pass
         await m.answer("Ты вышел из рулетки.", reply_markup=main_menu())
 
-    @dp.message(lambda m: not m.text.startswith("/") and m.text not in ["🔄 Следующий", "🚪 Выйти"])
+    # ИСПРАВЛЕНО: строгий StateFilter(None) и проверка m.text на None
+    @dp.message(StateFilter(None), lambda m: m.text and not m.text.startswith("/") and m.text not in ["🔄 Следующий", "🚪 Выйти"])
     async def roulette_message_handler(m: Message, state: FSMContext):
-        if await state.get_state() is not None: return
         uid = m.from_user.id
         partner_id = await db.roulette_get_partner(conn, uid)
         if partner_id:
@@ -535,7 +556,7 @@ async def main():
                 elif m.photo: await bot.send_photo(partner_id, m.photo[-1].file_id, caption="📷 Фото")
             except Exception: await m.answer("Не удалось отправить.")
 
-    # ---------- КТО ЛАЙКНУЛ ----------
+    # ================= КТО ЛАЙКНУЛ =================
     async def render_incoming(message: Message, uid, offset: int):
         total = await db.count_incoming_likes(conn, uid)
         if total == 0: return await message.answer("Пока нет лайков.", reply_markup=main_menu())
@@ -608,7 +629,7 @@ async def main():
         await callback.message.answer(f"✅ Фильтр: от {mn} до {mx} лет.", reply_markup=main_menu())
         await safe_answer(callback)
 
-    # ---------- РЕДАКТИРОВАНИЕ ПРОФИЛЯ (ИСПРАВЛЕНЫ ФОТО) ----------
+    # ================= РЕДАКТИРОВАНИЕ ПРОФИЛЯ =================
     @dp.callback_query(F.data == "edit_name")
     async def cb_edit_name(callback: CallbackQuery, state: FSMContext):
         await state.set_state(EditProfile.name)
@@ -662,27 +683,30 @@ async def main():
         await state.set_state(EditProfile.photo)
         user_photos[callback.from_user.id] = []
         await safe_delete(callback.message)
-        await callback.message.answer("Отправь новые фото (до 3-х).", reply_markup=photo_edit_kb())
+        await callback.message.answer("Отправь новые фото (до 3-х) или нажми на кнопки ниже.", reply_markup=photo_edit_kb())
         await safe_answer(callback)
 
-    # --- ИСПРАВЛЕНО: Обработчики кнопок редактирования фото ---
     @dp.message(EditProfile.photo, F.text == "Оставить текущее")
     async def edit_photo_keep(m: Message, state: FSMContext):
         uid = m.from_user.id
         old_u = await db.get_user(conn, uid)
         if old_u and old_u["photos"]:
             user_photos[uid] = old_u["photos"].split(",")
-            await m.answer(f"Оставлено текущее фото. Можешь добавить ещё или нажми «Сохранить фото».", reply_markup=photo_edit_kb())
+            await m.answer(f"Текущее фото оставлено. Можешь добавить ещё или нажми «Сохранить фото».", reply_markup=photo_edit_kb())
         else:
-            await m.answer("У тебя не было фото. Отправь новое.", reply_markup=photo_edit_kb())
+            await m.answer("У тебя не было фото. Отправь новое или возьми из профиля.", reply_markup=photo_edit_kb())
 
     @dp.message(EditProfile.photo, F.photo)
     async def save_new_photo(m: Message, state: FSMContext):
         uid = m.from_user.id
         if uid not in user_photos: user_photos[uid] = []
-        if len(user_photos[uid]) >= 3: return await m.answer("Ты уже добавил 3 фото. Нажми «Сохранить фото».")
+        if len(user_photos[uid]) >= 3: 
+            return await m.answer("Ты уже добавил 3 фото. Нажми «Сохранить фото».", reply_markup=photo_edit_kb())
+        
         new_photo = m.photo[-1].file_id
-        if new_photo in user_photos[uid]: return await m.answer("Ты уже добавил это фото.")
+        if new_photo in user_photos[uid]: 
+            return await m.answer("Ты уже добавил это фото.", reply_markup=photo_edit_kb())
+        
         user_photos[uid].append(new_photo)
         await m.answer(f"Фото добавлено ({len(user_photos[uid])}/3).", reply_markup=photo_edit_kb())
 
@@ -690,20 +714,29 @@ async def main():
     async def edit_photo_from_telegram(m: Message, state: FSMContext):
         uid = m.from_user.id
         if uid not in user_photos: user_photos[uid] = []
-        if len(user_photos[uid]) >= 3: return await m.answer("Уже 3 фото.")
+        if len(user_photos[uid]) >= 3: 
+            return await m.answer("Уже 3 фото.", reply_markup=photo_edit_kb())
+        
         try:
             photos = await bot.get_user_profile_photos(m.from_user.id, limit=1)
-            if not photos.total_count: return await m.answer("Нет фото в профиле.")
+            if not photos.total_count: 
+                return await m.answer("Нет фото в профиле Telegram.", reply_markup=photo_edit_kb())
+            
             file_id = photos.photos[0][-1].file_id
-            if file_id in user_photos[uid]: return await m.answer("Это фото уже добавлено.")
+            if file_id in user_photos[uid]: 
+                return await m.answer("Это фото уже добавлено.", reply_markup=photo_edit_kb())
+            
             user_photos[uid].append(file_id)
             await m.answer(f"Фото добавлено ({len(user_photos[uid])}/3).", reply_markup=photo_edit_kb())
-        except Exception: await m.answer("Не удалось получить фото.")
+        except Exception: 
+            await m.answer("Не удалось получить фото.", reply_markup=photo_edit_kb())
 
     @dp.message(EditProfile.photo, F.text == "Сохранить фото")
     async def edit_photo_save(m: Message, state: FSMContext):
         uid = m.from_user.id
-        if uid not in user_photos or not user_photos[uid]: return await m.answer("Нет фото!")
+        if uid not in user_photos or not user_photos[uid]: 
+            return await m.answer("Нет фото для сохранения! Добавь фото или нажми «Оставить текущее».", reply_markup=photo_edit_kb())
+        
         photos_str = ",".join(user_photos[uid])
         await conn.execute("UPDATE users SET photos=?, video_id='' WHERE user_id=?", (photos_str, uid))
         await conn.commit()
@@ -715,7 +748,7 @@ async def main():
     async def edit_photo_bad(m: Message, state: FSMContext):
         await m.answer("Отправь фото или нажми кнопку.", reply_markup=photo_edit_kb())
 
-    # ---------- ПРЕМИУМ ----------
+    # ================= ПРЕМИУМ =================
     @dp.callback_query(F.data.startswith("buy_premium_"))
     async def buy_premium(callback: CallbackQuery):
         days = int(callback.data.split("_")[-1])
@@ -743,13 +776,15 @@ async def main():
         await db.set_premium(conn, m.from_user.id, days)
         await m.answer(f"🎉 Спасибо! Премиум активирован на {days} дней.", reply_markup=main_menu())
 
-    # ---------- АДМИНКА ----------
+    # ================= АДМИНКА =================
     @dp.message(Command("admin"), F.from_user.id.in_(ADMIN_IDS))
-    async def admin_panel(m: Message):
+    async def admin_panel(m: Message, state: FSMContext):
+        await state.clear()
         await m.answer("👑 Админ-панель:", reply_markup=admin_menu_kb())
 
     @dp.callback_query(F.data == "adm_menu", F.from_user.id.in_(ADMIN_IDS))
-    async def adm_menu(callback: CallbackQuery):
+    async def adm_menu(callback: CallbackQuery, state: FSMContext):
+        await state.clear()
         await safe_delete(callback.message)
         await callback.message.answer("👑 Админ-панель:", reply_markup=admin_menu_kb())
         await safe_answer(callback)
@@ -763,11 +798,65 @@ async def main():
     async def adm_stats(callback: CallbackQuery):
         cur = await conn.execute("SELECT COUNT(*) n FROM users")
         total = (await cur.fetchone())["n"]
+        cur = await conn.execute("SELECT COUNT(*) n FROM users WHERE is_active=1 AND is_banned=0")
+        active = (await cur.fetchone())["n"]
         cur = await conn.execute("SELECT COUNT(*) n FROM matches")
         matches = (await cur.fetchone())["n"]
+        
+        now_iso = datetime.now(timezone.utc).isoformat()
+        cur = await conn.execute("SELECT COUNT(*) n FROM users WHERE premium_until IS NOT NULL AND premium_until > ?", (now_iso,))
+        premium = (await cur.fetchone())["n"]
+
         await safe_delete(callback.message)
-        await callback.message.answer(f"📊 Юзеров: {total}\n❤️ Матчей: {matches}", reply_markup=admin_back_kb())
+        await callback.message.answer(
+            f"📊 <b>Статистика</b>\n\n"
+            f"👥 Всего: {total}\n"
+            f"🟢 Активных: {active}\n"
+            f"⭐ Премиум: {premium}\n"
+            f"❤️ Матчей: {matches}",
+            parse_mode="HTML",
+            reply_markup=admin_back_kb())
         await safe_answer(callback)
+
+    # --- ВЫДАЧА ПРЕМИУМА ---
+    @dp.callback_query(F.data == "adm_premium", F.from_user.id.in_(ADMIN_IDS))
+    async def adm_premium(callback: CallbackQuery):
+        await safe_delete(callback.message)
+        await callback.message.answer("⭐ Выдача премиума\n\nВыбери срок:", reply_markup=admin_premium_kb())
+        await safe_answer(callback)
+
+    @dp.callback_query(F.data.startswith("adm_prem_"), F.from_user.id.in_(ADMIN_IDS))
+    async def adm_prem_choose(callback: CallbackQuery, state: FSMContext):
+        days = int(callback.data.split("_")[-1])
+        await state.set_state(AdminPanel.give_premium)
+        await state.update_data(adm_prem_days=days)
+        await safe_delete(callback.message)
+        await callback.message.answer(
+            f"Выбрано: {days} дней.\n\nОтправь <b>ID пользователя</b> (число):",
+            parse_mode="HTML",
+            reply_markup=admin_back_kb())
+        await safe_answer(callback)
+
+    @dp.message(AdminPanel.give_premium, F.text.regexp(r"^\d+$"), F.from_user.id.in_(ADMIN_IDS))
+    async def adm_prem_apply(m: Message, state: FSMContext):
+        data = await state.get_data()
+        days = data.get("adm_prem_days", 0)
+        if days <= 0:
+            await state.clear()
+            return await m.answer("❌ Срок не выбран.", reply_markup=admin_back_kb())
+
+        target_id = int(m.text.strip())
+        target = await db.get_user(conn, target_id)
+        if not target:
+            await state.clear()
+            return await m.answer("❌ Пользователь не найден.", reply_markup=admin_back_kb())
+
+        await db.add_reward(conn, target_id, days)
+        await state.clear()
+        await m.answer(f"✅ Премиум на {days} дней выдан пользователю {target_id}.", reply_markup=admin_back_kb())
+        try:
+            await bot.send_message(target_id, f"🎁 Тебе выдан Премиум на {days} дней!")
+        except Exception: pass
 
     @dp.callback_query(F.data == "adm_clear_db", F.from_user.id.in_(ADMIN_IDS))
     async def adm_clear_db(callback: CallbackQuery):
