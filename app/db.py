@@ -63,6 +63,7 @@ CREATE TABLE IF NOT EXISTS blocks (
 CREATE INDEX IF NOT EXISTS idx_users_feed ON users(is_active, is_banned, city, age, gender);
 CREATE INDEX IF NOT EXISTS idx_reactions_to ON reactions(to_user_id, reaction);
 CREATE INDEX IF NOT EXISTS idx_reactions_from ON reactions(from_user_id);
+CREATE INDEX IF NOT EXISTS idx_reports_target ON reports(target_id);  -- FIX: ускоряет подсчёт жалоб
 '''
 
 def now():
@@ -85,6 +86,7 @@ async def connect():
     db.row_factory = aiosqlite.Row
     await db.execute("PRAGMA foreign_keys=ON")
     await db.execute("PRAGMA journal_mode=WAL")
+    await db.execute("PRAGMA busy_timeout=5000")  # FIX: меньше блокировок при параллельных запросах
     await db.executescript(SCHEMA)
     try:
         await db.execute("ALTER TABLE users ADD COLUMN premium_until TEXT DEFAULT NULL")
@@ -135,9 +137,8 @@ async def next_profile(db, me, exclude_seen=True):
              OR (b.blocker_id = :uid AND b.blocked_id = u.user_id))'''
     if exclude_seen:
         query += " AND NOT EXISTS (SELECT 1 FROM reactions r WHERE r.from_user_id = :uid AND r.to_user_id = u.user_id)"
-    # премиум-приоритет: выносим решение в Python, а не в SQL
-    # (в SQLite формат ISO с '+00:00' плохо сравнивается с datetime('now'))
-    query += " LIMIT 30"
+    # FIX: увеличил выборку и явно отсортировал по свежести, чтобы премиум-приоритет работал стабильнее
+    query += " ORDER BY u.created_at DESC LIMIT 100"
     cur = await db.execute(query, params)
     rows = await cur.fetchall()
     if not rows:
@@ -250,7 +251,6 @@ async def block_user(db, blocker, blocked):
 async def undo_reaction(db, from_id, to_id):
     """Удаляет реакцию. Матч удаляем только если взаимной реакции больше нет."""
     await db.execute("DELETE FROM reactions WHERE from_user_id=? AND to_user_id=?", (from_id, to_id))
-    # проверяем, осталась ли взаимная реакция
     cur = await db.execute("SELECT 1 FROM reactions WHERE from_user_id=? AND to_user_id=? AND reaction='like'",
                            (to_id, from_id))
     mutual = await cur.fetchone()
@@ -258,6 +258,8 @@ async def undo_reaction(db, from_id, to_id):
         x, y = sorted((from_id, to_id))
         await db.execute("DELETE FROM matches WHERE user1_id=? AND user2_id=?", (x, y))
     await db.commit()
+    # FIX: возвращаем True, если матч был удалён — чтобы можно было уведомить собеседника
+    return not bool(mutual)
 
 async def get_last_reaction(db, from_id):
     """Последний лайк за 30 мин, который НЕ стал матчем — его можно отменить."""
@@ -310,3 +312,10 @@ async def check_premium(db, uid):
 
 async def set_premium(db, uid, days):
     await add_reward(db, uid, days)
+
+# FIX: отдельная функция для проверки, что лайк от b к a всё ещё существует
+async def has_like(db, from_id, to_id):
+    cur = await db.execute(
+        "SELECT 1 FROM reactions WHERE from_user_id=? AND to_user_id=? AND reaction='like'",
+        (from_id, to_id))
+    return await cur.fetchone() is not None
