@@ -1,6 +1,6 @@
 from aiogram.types import ReplyKeyboardMarkup, KeyboardButton, InlineKeyboardMarkup, InlineKeyboardButton
 
-# --- РЕПЛАЙ-КЛАВИАТУРЫ (Регистрация) ---
+# --- РЕПЛАЙ-КЛАВИАТУРЫ (ТОЛЬКО для регистрации) ---
 def gender_kb():
     return ReplyKeyboardMarkup(keyboard=[[KeyboardButton(text="Я девушка"), KeyboardButton(text="Я парень")]], resize_keyboard=True)
 
@@ -29,16 +29,20 @@ def photo_edit_kb():
 def confirm_kb():
     return ReplyKeyboardMarkup(keyboard=[[KeyboardButton(text="✅ Да, все верно")], [KeyboardButton(text="✏️ Изменить анкету")]], resize_keyboard=True)
 
-# --- ГЛАВНОЕ МЕНЮ (Нижняя клавиатура, как на 1-м скрине) ---
+# --- ГЛАВНОЕ МЕНЮ (Инлайн, по 2 кнопки в ряд) ---
 def main_menu():
-    return ReplyKeyboardMarkup(keyboard=[
-        [KeyboardButton(text="🔎 Смотреть анкеты"), KeyboardButton(text="👤 Моя анкета")],
-        [KeyboardButton(text="💖 Кто меня лайкнул"), KeyboardButton(text="🎲 Чат-рулетка")],
-        [KeyboardButton(text="🎂 Фильтр возраста"), KeyboardButton(text="🔗 Пригласить друга")],
-        [KeyboardButton(text="🌙 Сон / Поиск"), KeyboardButton(text="⭐ Премиум")]
-    ], resize_keyboard=True)
+    return InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text="🔎 Смотреть анкеты", callback_data="menu_feed"),
+         InlineKeyboardButton(text="👤 Моя анкета", callback_data="menu_profile")],
+        [InlineKeyboardButton(text="💖 Кто меня лайкнул", callback_data="menu_likes"),
+         InlineKeyboardButton(text="🎲 Чат-рулетка", callback_data="menu_roulette")],
+        [InlineKeyboardButton(text="🎂 Фильтр возраста", callback_data="menu_age"),
+         InlineKeyboardButton(text="🔗 Пригласить друга", callback_data="menu_invite")],
+        [InlineKeyboardButton(text="🌙 Сон / Поиск", callback_data="menu_sleep"),
+         InlineKeyboardButton(text="⭐ Премиум", callback_data="menu_premium")]
+    ])
 
-# --- РАЗДЕЛ "МОЯ АНКЕТА" (Инлайн-меню, как на 2-м скрине) ---
+# --- МЕНЮ ПРОФИЛЯ (Инлайн, по 1 кнопке в ряд) ---
 def profile_menu_kb():
     return InlineKeyboardMarkup(inline_keyboard=[
         [InlineKeyboardButton(text="✏️ Изменить информацию", callback_data="prof_edit_info")],
@@ -52,7 +56,7 @@ def profile_menu_kb():
         [InlineKeyboardButton(text="⏸ Скрыть анкету", callback_data="prof_hide")]
     ])
 
-# --- ИНЛАЙН-КНОПКИ ДЛЯ ЛЕНТЫ И ЛАЙКОВ ---
+# --- ОСТАЛЬНЫЕ ИНЛАЙН-КНОПКИ ---
 def feed_kb(target_id: int):
     return InlineKeyboardMarkup(inline_keyboard=[
         [InlineKeyboardButton(text="❤️", callback_data=f"like:{target_id}"),
@@ -67,7 +71,6 @@ def incoming_kb(target_id: int):
         [InlineKeyboardButton(text="➡️ Пропустить", callback_data=f"skip:{target_id}")]
     ])
 
-# --- МЕНЮ РЕДАКТИРОВАНИЯ ---
 def edit_menu_kb():
     return InlineKeyboardMarkup(inline_keyboard=[
         [InlineKeyboardButton(text="📝 Изменить описание", callback_data="edit_bio")],
