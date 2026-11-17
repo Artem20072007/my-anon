@@ -82,7 +82,7 @@ async def save_user(db, data):
     await db.execute('''INSERT INTO users
     (user_id,username,name,age,gender,target_gender,target_age_min,target_age_max,city,bio,photos,video_id,referral_id,created_at)
     VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?)
-    ON CONFLICT(user_id) DO UPDATE SET 
+    ON CONFLICT(user_id) DO UPDATE SET
     username=excluded.username,name=excluded.name,age=excluded.age,gender=excluded.gender,
     target_gender=excluded.target_gender,target_age_min=excluded.target_age_min,
     target_age_max=excluded.target_age_max,city=excluded.city,bio=excluded.bio,
@@ -94,21 +94,32 @@ async def save_user(db, data):
     await db.commit()
 
 async def next_profile(db, me, exclude_seen=True):
-    # ИСПРАВЛЕНИЕ: правильное число ? (10 без exclude_seen, 11 с ним)
-    seen_condition = "AND NOT EXISTS (SELECT 1 FROM reactions r WHERE r.from_user_id=? AND r.to_user_id=u.user_id)" if exclude_seen else ""
-    params = [
-        me["user_id"], CITY, me["target_age_min"], me["target_age_max"],
-        me["target_gender"], me["target_gender"], me["gender"], me["gender"],
-        me["user_id"], me["user_id"]
-    ]
-    if exclude_seen:
-        params.append(me["user_id"])
+    # Именованные параметры исключают ошибку несоответствия числа знаков ?.
+    seen_condition = """
+      AND NOT EXISTS (
+        SELECT 1 FROM reactions r
+        WHERE r.from_user_id=:uid AND r.to_user_id=u.user_id
+      )
+    """ if exclude_seen else ""
+    params = {
+        "uid": me["user_id"],
+        "city": CITY,
+        "min_age": me["target_age_min"],
+        "max_age": me["target_age_max"],
+        "target_gender": me["target_gender"],
+        "gender": me["gender"],
+    }
     cur = await db.execute(f'''SELECT u.* FROM users u
-      WHERE u.user_id != ? AND u.city=? COLLATE NOCASE AND u.is_active=1 AND u.is_banned=0
-      AND u.age BETWEEN ? AND ?
-      AND (u.gender=? OR ?='all')
-      AND (u.target_gender=? OR u.target_gender='all')
-      AND NOT EXISTS (SELECT 1 FROM blocks b WHERE (b.blocker_id=u.user_id AND b.blocked_id=?) OR (b.blocker_id=? AND b.blocked_id=u.user_id))
+      WHERE u.user_id != :uid AND u.city=:city COLLATE NOCASE
+      AND u.is_active=1 AND u.is_banned=0
+      AND u.age BETWEEN :min_age AND :max_age
+      AND (u.gender=:target_gender OR :target_gender='all')
+      AND (u.target_gender=:gender OR u.target_gender='all')
+      AND NOT EXISTS (
+        SELECT 1 FROM blocks b
+        WHERE (b.blocker_id=u.user_id AND b.blocked_id=:uid)
+           OR (b.blocker_id=:uid AND b.blocked_id=u.user_id)
+      )
       {seen_condition}
       ORDER BY u.created_at DESC LIMIT 1''', params)
     return await cur.fetchone()
@@ -165,7 +176,6 @@ async def undo_reaction(db, from_id, to_id):
     await db.commit()
 
 async def get_last_reaction(db, from_id):
-    # ИСПРАВЛЕНИЕ: возвращаем только свежий лайк (за последние 10 минут)
     time_limit = (datetime.now(timezone.utc) - timedelta(minutes=10)).isoformat()
     cur = await db.execute(
         "SELECT to_user_id FROM reactions WHERE from_user_id=? AND created_at > ? ORDER BY id DESC LIMIT 1",
