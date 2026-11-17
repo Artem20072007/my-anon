@@ -34,16 +34,19 @@ def main_menu():
         [KeyboardButton(text="ℹ️ Помощь")]
     ], resize_keyboard=True)
 
-def feed_kb():
+# FIX: target_id в callback_data — карточка работает после рестарта бота
+def feed_kb(target_id: int):
     return InlineKeyboardMarkup(inline_keyboard=[
-        [InlineKeyboardButton(text="❤️", callback_data="like"), InlineKeyboardButton(text="👎", callback_data="dislike")],
-        [InlineKeyboardButton(text="💤 Скрыть", callback_data="sleep"), InlineKeyboardButton(text="↩️ Отменить", callback_data="undo")]
+        [InlineKeyboardButton(text="❤️", callback_data=f"like:{target_id}"),
+         InlineKeyboardButton(text="👎", callback_data=f"dislike:{target_id}")],
+        [InlineKeyboardButton(text="💤 Скрыть", callback_data="sleep"),
+         InlineKeyboardButton(text="↩️ Отменить", callback_data="undo")]
     ])
 
-def incoming_kb():
+def incoming_kb(target_id: int):
     return InlineKeyboardMarkup(inline_keyboard=[
-        [InlineKeyboardButton(text="💚 Ответить взаимностью", callback_data="like_back")],
-        [InlineKeyboardButton(text="➡️ Пропустить", callback_data="skip")]
+        [InlineKeyboardButton(text="💚 Ответить взаимностью", callback_data=f"like_back:{target_id}")],
+        [InlineKeyboardButton(text="➡️ Пропустить", callback_data=f"skip:{target_id}")]
     ])
 
 def liked_kb(url):
@@ -80,7 +83,6 @@ def premium_kb():
     ])
 
 def likes_nav_kb(offset, total, prefix):
-    """Навигация по страницам. Всегда возвращает markup (хотя бы пустой), чтобы caller не падал."""
     row = []
     if offset > 0:
         row.append(InlineKeyboardButton(text="⬅️ Назад", callback_data=f"{prefix}_page_{offset-1}"))
@@ -88,7 +90,6 @@ def likes_nav_kb(offset, total, prefix):
         row.append(InlineKeyboardButton(text="Вперёд ➡️", callback_data=f"{prefix}_page_{offset+1}"))
     return InlineKeyboardMarkup(inline_keyboard=[row]) if row else None
 
-# FIX: отдельная клавиатура «назад в меню» для случаев, когда навигации нет
 def back_to_menu_kb():
     return InlineKeyboardMarkup(inline_keyboard=[
         [InlineKeyboardButton(text="🏠 В меню", callback_data="go_menu")]
