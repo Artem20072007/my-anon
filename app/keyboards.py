@@ -61,3 +61,18 @@ def edit_menu_kb():
         [InlineKeyboardButton(text="🎂 Изменить возраст", callback_data="edit_age")],
         [InlineKeyboardButton(text="❌ Отмена", callback_data="cancel_edit")]
     ])
+    
+    # Добавь это в конец файла app/keyboards.py
+
+def age_filter_kb():
+    return InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text="14-17", callback_data="age_14_17"), InlineKeyboardButton(text="18-24", callback_data="age_18_24")],
+        [InlineKeyboardButton(text="25-35", callback_data="age_25_35"), InlineKeyboardButton(text="36-99", callback_data="age_36_99")],
+        [InlineKeyboardButton(text="Все возраста", callback_data="age_all")]
+    ])
+
+def premium_kb():
+    return InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text="7 дней - 50 ⭐️", callback_data="buy_premium_7")],
+        [InlineKeyboardButton(text="30 дней - 150 ⭐️", callback_data="buy_premium_30")]
+    ])
