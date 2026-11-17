@@ -69,7 +69,7 @@ async def show_profile(message: Message, p, mode="feed", extra_kb=None):
         return
     if mode == "feed": markup = feed_kb(p["user_id"])
     elif mode == "incoming": markup = incoming_kb(p["user_id"])
-    elif mode == "mine": markup = profile_menu_kb() # ТУТ REPLY-КЛАВИАТУРА ПРОФИЛЯ
+    elif mode == "mine": markup = profile_menu_kb()
     elif mode == "match": markup = InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text="💬 Написать", url=user_link(p))]])
     else: markup = extra_kb
         
@@ -313,7 +313,6 @@ async def main():
     async def my_profile(m: Message):
         u = await db.get_user(conn, m.from_user.id)
         if not u: return await m.answer("Нет анкеты.", reply_markup=main_menu())
-        # Показываем анкету и ВКЛЮЧАЕМ REPLY-КЛАВИАТУРУ ПРОФИЛЯ
         await show_profile(m, u, mode="mine")
 
     @dp.message(F.text == "⭐ Премиум")
@@ -337,12 +336,6 @@ async def main():
     @dp.message(F.text == "✏️ Изменить информацию")
     async def prof_edit_info(m: Message):
         await m.answer("✏️ Что хочешь изменить?", reply_markup=edit_menu_kb())
-
-    @dp.message(F.text == "📸 Мои фотографии")
-    async def prof_edit_photo(m: Message, state: FSMContext):
-        await state.set_state(EditProfile.photo)
-        user_photos[m.from_user.id] = []
-        await m.answer("Отправь новые фото (до 3-х).", reply_markup=photo_edit_kb())
 
     @dp.message(F.text == "🎂 Фильтр возраста")
     async def prof_age_filter(m: Message):
