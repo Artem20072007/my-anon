@@ -23,7 +23,7 @@ MIN_AGE = 14
 MAX_AGE = 99
 CITY = "Чистополь"
 
-conn = None # Глобальная переменная
+conn = None # Глобальная переменная для БД
 
 user_photos = {}
 likes_state = {}
@@ -69,7 +69,7 @@ async def show_profile(message: Message, p, mode="feed", extra_kb=None):
         return
     if mode == "feed": markup = feed_kb(p["user_id"])
     elif mode == "incoming": markup = incoming_kb(p["user_id"])
-    elif mode == "mine": markup = edit_profile_kb() if 'edit_profile_kb' in globals() else profile_menu_kb()
+    elif mode == "mine": markup = profile_menu_kb()
     elif mode == "match": markup = InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text="💬 Написать", url=user_link(p))]])
     else: markup = extra_kb
         
@@ -130,7 +130,7 @@ async def notify_new_profiles(bot: Bot, conn):
                 last = last_notify.get(uid)
                 if last and (now_dt - last) < timedelta(hours=3): continue
                 try:
-                    await bot.send_message(uid, f"🔔 За последние 30 минут появилось {new_count} новых анкет в {CITY}! Загляни в поиск.")
+                    await bot.send_message(uid, f"🔔 За последние 30 минут появилось {new_count} новых анкет в {CITY}!")
                     last_notify[uid] = now_dt
                 except Exception: pass
         except Exception as e:
@@ -162,13 +162,13 @@ async def main():
         else:
             await m.answer("С возвращением! Главное меню:", reply_markup=main_menu())
 
-    # --- Возврат в главное меню ---
-    @dp.callback_query(F.data == "menu_main")
-    async def cb_main_menu(callback: CallbackQuery, state: FSMContext):
+    @dp.message(Command("cancel"), StateFilter("*"))
+    @dp.message(F.text == "Отмена", StateFilter("*"))
+    async def cancel(m: Message, state: FSMContext):
         await state.clear()
-        await safe_delete(callback.message)
-        await callback.message.answer("🏠 Главное меню:", reply_markup=main_menu())
-        await safe_answer(callback)
+        user_photos.pop(m.from_user.id, None)
+        likes_state.pop(m.from_user.id, None)
+        await m.answer("Действие отменено.", reply_markup=main_menu())
 
     # ---------- Регистрация ----------
     @dp.message(Registration.gender)
@@ -273,8 +273,7 @@ async def main():
             else:
                 await state.set_state(Registration.confirm)
                 await m.answer_photo(photo=user_photos[uid][0], caption=f"Проверь: {d['name']}, {d['age']}", reply_markup=confirm_kb())
-        except Exception:
-            await m.answer("Ошибка получения фото.")
+        except Exception: await m.answer("Ошибка получения фото.")
 
     @dp.message(Registration.photo)
     async def reg_media_bad(m: Message, state: FSMContext):
@@ -298,62 +297,74 @@ async def main():
             except Exception: pass
         await state.clear()
         user_photos.pop(m.from_user.id, None)
-        await m.answer("Анкета готова!", reply_markup=main_menu())
+        await m.answer("Анкета готова! Главное меню:", reply_markup=main_menu())
 
-    # ---------- Обработка кнопок Главного меню ----------
-    @dp.callback_query(F.data == "menu_feed")
-    async def cb_feed(callback: CallbackQuery):
-        me = await db.get_user(conn, callback.from_user.id)
-        if not me: return await safe_answer(callback, "Создай анкету /start", show_alert=True)
-        likes_state.pop(callback.from_user.id, None)
+    # ---------- ОБРАБОТКА НИЖНИХ КНОПОК ----------
+    @dp.message(F.text == "🔎 Смотреть анкеты")
+    async def feed(m: Message):
+        me = await db.get_user(conn, m.from_user.id)
+        if not me: return await m.answer("Сначала создай анкету /start", reply_markup=main_menu())
+        likes_state.pop(m.from_user.id, None)
         p = await db.next_profile(conn, me)
-        if p:
-            await safe_delete(callback.message)
-            await show_profile(callback.message, p)
-        else:
-            await safe_answer(callback, "Анкеты закончились!", show_alert=True)
+        if p: await show_profile(m, p)
+        else: await m.answer("Анкеты закончились. Заходи позже!", reply_markup=main_menu())
 
-    @dp.callback_query(F.data == "menu_profile")
-    async def cb_my_profile(callback: CallbackQuery):
-        u = await db.get_user(conn, callback.from_user.id)
-        if not u: return await safe_answer(callback, "Нет анкеты. Напиши /start", show_alert=True)
-        await safe_delete(callback.message)
+    @dp.message(F.text == "👤 Моя анкета")
+    async def my_profile(m: Message):
+        u = await db.get_user(conn, m.from_user.id)
+        if not u: return await m.answer("Нет анкеты.", reply_markup=main_menu())
         
-        # Отправляем превью профиля с инлайн-меню
         stats = await db.get_profile_stats(conn, u["user_id"])
         caption = profile_caption(u, stats)
         photos = u["photos"].split(",") if u["photos"] else []
         
         if photos:
-            await callback.message.answer_photo(photos[0], caption=caption, reply_markup=profile_menu_kb())
+            await m.answer_photo(photos[0], caption=caption, reply_markup=profile_menu_kb())
         elif u["video_id"]:
-            await callback.message.answer_video(u["video_id"], caption=caption, reply_markup=profile_menu_kb())
+            await m.answer_video(u["video_id"], caption=caption, reply_markup=profile_menu_kb())
         else:
-            await callback.message.answer(caption, reply_markup=profile_menu_kb())
-            
-        await safe_answer(callback)
+            await m.answer(caption, reply_markup=profile_menu_kb())
 
-    @dp.callback_query(F.data == "menu_likes")
-    async def cb_likes_menu(callback: CallbackQuery):
-        await safe_delete(callback.message)
-        await render_incoming(callback.message, callback.from_user.id, 0)
-        await safe_answer(callback)
+    @dp.message(F.text == "🎂 Фильтр возраста")
+    async def age_filter(m: Message):
+        me = await db.get_user(conn, m.from_user.id)
+        cur = f"Сейчас: от {me['target_age_min']} до {me['target_age_max']} лет." if me else ""
+        await m.answer(f"{cur}\n\nВыбери диапазон возрастов для поиска:", reply_markup=age_filter_kb())
 
-    @dp.callback_query(F.data == "menu_roulette")
-    async def cb_roulette_menu(callback: CallbackQuery, state: FSMContext):
-        await safe_delete(callback.message)
-        await start_roulette(callback.message, state)
-        await safe_answer(callback)
+    @dp.message(F.text == "⭐ Премиум")
+    async def premium_menu(m: Message):
+        is_prem = await db.check_premium(conn, m.from_user.id)
+        status = "✅ У тебя активен Премиум!" if is_prem else "❌ У тебя нет Премиума."
+        text = f"{status}\n\nЧто дает Премиум:\n1. Видишь ВСЕХ, кто тебя лайкнул.\n2. Твоя анкета показывается первой.\n3. Отмена лайков.\n\nВыбери тариф:"
+        await m.answer(text, reply_markup=premium_kb())
 
-    @dp.callback_query(F.data == "menu_invite")
-    async def cb_invite_menu(callback: CallbackQuery):
+    @dp.message(F.text == "🔗 Пригласить друга")
+    async def invite_friend(m: Message):
         bot_info = await bot.get_me()
-        ref_link = f"https://t.me/{bot_info.username}?start=ref_{callback.from_user.id}"
+        ref_link = f"https://t.me/{bot_info.username}?start=ref_{m.from_user.id}"
+        await m.answer(f"Пригласи друга по этой ссылке:\n{ref_link}\n\nКогда он зарегистрируется, ты получишь +3 дня Премиума!")
+
+    @dp.message(F.text == "🌙 Сон / Поиск")
+    async def toggle(m: Message):
+        u = await db.get_user(conn, m.from_user.id)
+        if not u: return await m.answer("Сначала создай анкету /start", reply_markup=main_menu())
+        new = 0 if u["is_active"] else 1
+        await conn.execute("UPDATE users SET is_active=? WHERE user_id=?", (new, m.from_user.id))
+        await conn.commit()
+        await m.answer("Анкета скрыта 🌙" if not new else "Анкета в поиске 💚", reply_markup=main_menu())
+
+    @dp.message(F.text == "💖 Кто меня лайкнул")
+    async def likes_in(m: Message):
+        await render_incoming(m, m.from_user.id, 0)
+
+    # ---------- ИНЛАЙН-ОБРАБОТЧИКИ ДЛЯ "МОЯ АНКЕТА" ----------
+    @dp.callback_query(F.data == "menu_profile")
+    async def cb_back_to_profile(callback: CallbackQuery):
         await safe_delete(callback.message)
-        await callback.message.answer(f"🔗 Твоя ссылка для приглашения:\n{ref_link}\n\nЗа каждого друга +3 дня Премиума!", reply_markup=back_to_menu_kb())
+        u = await db.get_user(conn, callback.from_user.id)
+        await show_profile(callback.message, u, mode="mine")
         await safe_answer(callback)
 
-    # ---------- Меню "Моя анкета" ----------
     @dp.callback_query(F.data == "prof_edit_info")
     async def cb_prof_edit_info(callback: CallbackQuery):
         await safe_delete(callback.message)
@@ -409,7 +420,7 @@ async def main():
         await conn.execute("UPDATE users SET is_active=? WHERE user_id=?", (new, callback.from_user.id))
         await conn.commit()
         await safe_delete(callback.message)
-        await callback.message.answer(f"✅ Анкета {'скрыта 🌙' if not new else 'в поиске 💚'}", reply_markup=back_to_menu_kb())
+        await callback.message.answer(f"✅ Анкета {'скрыта 🌙' if not new else 'в поиске 💚'}", reply_markup=main_menu())
         await safe_answer(callback)
 
     @dp.callback_query(F.data == "prof_hide")
@@ -422,21 +433,24 @@ async def main():
 
     @dp.callback_query(F.data == "prof_premium")
     async def cb_prof_premium(callback: CallbackQuery):
-        is_prem = await db.check_premium(conn, callback.from_user.id)
-        status = "✅ У тебя активен Премиум!" if is_prem else "❌ У тебя нет Премиума."
-        text = f"{status}\n\nЧто дает Премиум:\n1. Видишь всех, кто тебя лайкнул.\n2. Твоя анкета показывается первой.\n3. Отмена лайков.\n\nВыбери тариф:"
-        await safe_delete(callback.message)
-        await callback.message.answer(text, reply_markup=premium_kb())
+        await premium_menu(callback.message)
         await safe_answer(callback)
 
     @dp.callback_query(F.data == "prof_preview")
     async def cb_prof_preview(callback: CallbackQuery):
         u = await db.get_user(conn, callback.from_user.id)
         await safe_delete(callback.message)
-        await show_profile(callback.message, u, mode="feed") # показываем как в ленте (с кнопками лайка)
+        await show_profile(callback.message, u, mode="feed")
         await safe_answer(callback, "Так тебя видят другие.")
 
-    # ---------- Остальные логики (Лайки, Жалобы, Редактирование и т.д.) ----------
+    @dp.callback_query(F.data == "go_menu")
+    async def go_menu(callback: CallbackQuery):
+        likes_state.pop(callback.from_user.id, None)
+        await safe_delete(callback.message)
+        await callback.message.answer("🏠 Главное меню", reply_markup=main_menu())
+        await safe_answer(callback)
+
+    # ---------- ОСТАЛЬНАЯ ЛОГИКА ----------
     @dp.callback_query(F.data.startswith("like:") | F.data.startswith("dislike:"))
     async def handle_reaction(callback: CallbackQuery):
         uid = callback.from_user.id
@@ -451,8 +465,7 @@ async def main():
             me = await db.get_user(conn, uid)
             await callback.message.answer("💚 <b>Взаимная симпатия!</b>", parse_mode="HTML")
             await show_profile(callback.message, other, mode="match")
-            try:
-                await bot.send_message(target, f"💚 Взаимная симпатия! Написать: {user_link(me)}")
+            try: await bot.send_message(target, f"💚 Взаимная симпатия! Написать: {user_link(me)}")
             except Exception: pass
                 
         me = await db.get_user(conn, uid)
@@ -490,11 +503,10 @@ async def main():
     async def handle_report(callback: CallbackQuery):
         target = int(callback.data.split(":", 1)[1])
         res = await db.add_report(conn, callback.from_user.id, target, "Жалоба")
-        if res:
-            if res >= 3:
-                for admin_id in ADMIN_IDS:
-                    try: await bot.send_message(admin_id, f"🚨 Автобан: {target}")
-                    except: pass
+        if res and res >= 3:
+            for admin_id in ADMIN_IDS:
+                try: await bot.send_message(admin_id, f"🚨 Автобан: {target}")
+                except: pass
         await safe_delete(callback.message)
         await safe_answer(callback, "Жалоба отправлена.")
         me = await db.get_user(conn, callback.from_user.id)
@@ -506,12 +518,13 @@ async def main():
         target = int(callback.data.split(":", 1)[1])
         await db.block_user(conn, callback.from_user.id, target)
         await safe_delete(callback.message)
-        await safe_answer(callback, "Пользователь заблокирован.")
+        await safe_answer(callback, "Заблокирован.")
         me = await db.get_user(conn, callback.from_user.id)
         p = await db.next_profile(conn, me)
         if p: await show_profile(callback.message, p)
 
-    # ---------- ЧАТ-РУЛЕТКА (Логика) ----------
+    # ---------- ЧАТ-РУЛЕТКА ----------
+    @dp.message(F.text == "🎲 Чат-рулетка")
     async def start_roulette(m: Message, state: FSMContext):
         me = await db.get_user(conn, m.from_user.id)
         if not me: return await m.answer("Сначала создай анкету /start")
@@ -526,8 +539,7 @@ async def main():
             if partner:
                 await msg.delete()
                 await m.answer(f"🎉 Собеседник найден!\n\n{profile_caption(partner)}\n\nНажми «Начать общение»", reply_markup=roulette_found_kb())
-                try:
-                    await bot.send_message(partner_id, f"🎉 Собеседник найден!\n\n{profile_caption(me)}\n\nНажми «Начать»", reply_markup=roulette_found_kb())
+                try: await bot.send_message(partner_id, f"🎉 Собеседник найден!\n\n{profile_caption(me)}\n\nНажми «Начать»", reply_markup=roulette_found_kb())
                 except Exception: pass
         else:
             await msg.edit_text("⏳ Ожидаем собеседника...")
@@ -642,10 +654,12 @@ async def main():
         await render_incoming(callback.message, uid, st["offset"] if st else 0)
         await safe_answer(callback)
 
-    # ---------- ФИЛЬТР ВОЗРАСТА ----------
     @dp.callback_query(F.data.startswith("age_"))
     async def set_age_filter(callback: CallbackQuery):
         val = callback.data
+        if val == "age_close":
+            await safe_delete(callback.message)
+            return await safe_answer(callback)
         if val == "age_all": mn, mx = MIN_AGE, MAX_AGE
         else:
             parts = val.replace("age_", "").split("_")
@@ -656,7 +670,7 @@ async def main():
         await callback.message.answer(f"✅ Фильтр: от {mn} до {mx} лет.", reply_markup=main_menu())
         await safe_answer(callback)
 
-    # ---------- РЕДАКТИРОВАНИЕ ПРОФИЛЯ (Из инлайн-меню) ----------
+    # ---------- РЕДАКТИРОВАНИЕ ПРОФИЛЯ ----------
     @dp.callback_query(F.data == "edit_name")
     async def cb_edit_name(callback: CallbackQuery, state: FSMContext):
         await state.set_state(EditProfile.name)
@@ -752,7 +766,7 @@ async def main():
     async def edit_photo_bad(m: Message, state: FSMContext):
         await m.answer("Отправь фото или нажми кнопку.", reply_markup=photo_edit_kb())
 
-    # ---------- ПРЕМИУМ (Оплата) ----------
+    # ---------- ПРЕМИУМ ----------
     @dp.callback_query(F.data.startswith("buy_premium_"))
     async def buy_premium(callback: CallbackQuery):
         days = int(callback.data.split("_")[-1])
@@ -835,29 +849,6 @@ async def main():
             await msg.edit_text("✅ База очищена!", reply_markup=admin_back_kb())
         except Exception as e:
             await msg.edit_text(f"❌ Ошибка: {e}", reply_markup=admin_back_kb())
-
-    @dp.message(Command("verify"), F.from_user.id.in_(ADMIN_IDS))
-    async def admin_verify(m: Message):
-        try: uid = int(m.text.split()[1])
-        except: return await m.answer("Использование: /verify <id>")
-        await db.verify_user(conn, uid)
-        await m.answer(f"✅ Юзер {uid} верифицирован.")
-
-    @dp.message(Command("ban"), F.from_user.id.in_(ADMIN_IDS))
-    async def admin_ban(m: Message):
-        try: uid = int(m.text.split()[1])
-        except: return await m.answer("Использование: /ban <id>")
-        await conn.execute("UPDATE users SET is_banned=1, is_active=0 WHERE user_id=?", (uid,))
-        await conn.commit()
-        await m.answer(f"🚫 Юзер {uid} забанен.")
-
-    @dp.message(Command("unban"), F.from_user.id.in_(ADMIN_IDS))
-    async def admin_unban(m: Message):
-        try: uid = int(m.text.split()[1])
-        except: return await m.answer("Использование: /unban <id>")
-        await conn.execute("UPDATE users SET is_banned=0 WHERE user_id=?", (uid,))
-        await conn.commit()
-        await m.answer(f"✅ Юзер {uid} разбанен.")
 
     try:
         await dp.start_polling(bot)
