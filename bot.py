@@ -23,8 +23,9 @@ MIN_AGE = 14
 MAX_AGE = 99
 CITY = "Чистополь"
 
-user_photos = {}    # uid -> [file_id]
-likes_state = {}    # uid -> {"offset": int, "kind": "incoming"|"mine"}
+user_photos = {}    
+likes_state = {}    
+STOP_WORDS = ["член", "секс", "анал", "интим", "пошлый", "ебаться"]
 
 async def safe_delete(message: Message):
     try:
@@ -47,18 +48,36 @@ def user_link(user):
         return f"https://t.me/{user['username']}"
     return f"tg://user?id={user['user_id']}"
 
-def profile_caption(p):
+def profile_caption(p, stats=None):
     if not p or "name" not in p.keys(): return "Ошибка анкеты"
+    
     verified = " ✅" if p["is_verified"] else ""
     name = (p["name"] or "").strip().capitalize() or "Без имени"
     age = p["age"]
     city = (p["city"] or "").capitalize()
     bio = (p["bio"] or '').strip() if "bio" in p.keys() else ''
-    if bio.lower() in ["пропустить", "пропустить фото", "без описания"]:
+    
+    if bio.lower() in ["пропустить", "пропустить фото", "пропустить шаг", "без описания"]:
         bio = ""
+        
+    premium_mark = ""
+    if "premium_until" in p.keys() and p["premium_until"]:
+        from app.db import _parse_dt
+        pu = _parse_dt(p["premium_until"])
+        if pu and pu > datetime.now(timezone.utc):
+            premium_mark = " 🌟 Премиум"
+
+    header = f"{name}{verified}{premium_mark}, {age}\n📍 {city}"
     if bio:
-        return f"{name}{verified}, {age}, {city} — {bio}"
-    return f"{name}{verified}, {age}, {city}"
+        header += f"\n💬 {bio}"
+    else:
+        header += "\n💬 Пока нет описания"
+        
+    if stats:
+        likes, views = stats
+        header += f"\n\n❤️ Лайки: {likes}\n👀 Просмотры: {views}"
+        
+    return header
 
 async def show_profile(message: Message, p, mode="feed", extra_kb=None):
     if not p:
@@ -73,12 +92,14 @@ async def show_profile(message: Message, p, mode="feed", extra_kb=None):
         markup = edit_profile_kb()
     elif mode == "match":
         markup = InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text="💬 Написать", url=user_link(p))]])
-    elif mode == "my_likes":
-        markup = my_likes_kb()
     else:
         markup = extra_kb
         
-    caption = profile_caption(p)
+    stats = await db.get_profile_stats(conn, p["user_id"])
+    if mode == "feed" and message.chat.id != p["user_id"]:
+        await db.register_view(conn, message.chat.id, p["user_id"])
+        
+    caption = profile_caption(p, stats)
     photos = p["photos"].split(",") if ("photos" in p.keys() and p["photos"]) else []
     if photos:
         if mode in ("feed", "incoming", "match") or len(photos) == 1:
@@ -197,49 +218,54 @@ async def main():
     @dp.message(Registration.gender)
     async def reg_gender(m: Message, state: FSMContext):
         val = {"Я парень":"m", "Я девушка":"f"}.get(m.text)
-        if not val: return await m.answer("Жми кнопки.", reply_markup=gender_kb())
+        if not val: return await m.answer("Выбери свой пол на кнопках ниже.", reply_markup=gender_kb())
         await state.update_data(gender=val)
         await state.set_state(Registration.target_gender)
-        await m.answer("Кого показывать?", reply_markup=target_kb())
+        await m.answer("С кем хочешь знакомиться?", reply_markup=target_kb())
 
     @dp.message(Registration.target_gender)
     async def reg_target(m: Message, state: FSMContext):
-        val = {"Парни":"m", "Девушки":"f", "Все равно":"all"}.get(m.text)
-        if not val: return await m.answer("Жми кнопки.", reply_markup=target_kb())
+        val = {"С парнями":"m", "С девушками":"f", "Без разницы":"all"}.get(m.text)
+        if not val: return await m.answer("Пожалуйста, выбери вариант на кнопках.", reply_markup=target_kb())
         await state.update_data(target_gender=val)
         await state.set_state(Registration.city)
-        await m.answer(f"В каком ты городе? Наш бот работает только в городе {CITY}.", reply_markup=city_kb())
+        await m.answer(f"📍 В каком городе ты живёшь?\n\nНаш бот работает только в городе {CITY}.", reply_markup=city_kb())
 
     @dp.message(Registration.city)
     async def reg_city(m: Message, state: FSMContext):
         if (m.text or "").strip().lower() not in ["чистополь", "г. чистополь"]:
-            return await m.answer(f"❌ Бот работает только в {CITY}. Нажми кнопку ниже.", reply_markup=city_kb())
+            return await m.answer(f"❌ Пока мы работаем только в {CITY}. Нажми кнопку ниже.", reply_markup=city_kb())
         await state.update_data(city=CITY)
         await state.set_state(Registration.name)
-        await m.answer("Как мне тебя называть?", reply_markup=ReplyKeyboardRemove())
+        await m.answer("Как тебя зовут?", reply_markup=ReplyKeyboardRemove())
 
     @dp.message(Registration.name)
     async def reg_name(m: Message, state: FSMContext):
         name = (m.text or "").strip()
         if not name or len(name) > 30:
-            return await m.answer("Имя от 1 до 30 символов.")
+            return await m.answer("Имя должно быть от 1 до 30 символов.")
         await state.update_data(name=name)
         await state.set_state(Registration.age)
-        await m.answer(f"Сколько тебе лет? (от {MIN_AGE})")
+        await m.answer(f"🎂 Сколько тебе лет? (от {MIN_AGE})")
 
     @dp.message(Registration.age)
     async def reg_age(m: Message, state: FSMContext):
         if not m.text or not m.text.isdigit() or int(m.text) < MIN_AGE or int(m.text) > MAX_AGE:
-            return await m.answer(f"Возраст от {MIN_AGE} до {MAX_AGE} лет.")
+            return await m.answer(f"Возраст должен быть от {MIN_AGE} до {MAX_AGE} лет.")
         await state.update_data(age=int(m.text))
         await state.set_state(Registration.bio)
-        bio_kb = ReplyKeyboardMarkup(keyboard=[[KeyboardButton(text="Пропустить")]], resize_keyboard=True)
-        await m.answer("Расскажи о себе и кого хочешь найти, чем предлагаешь заняться. Это поможет лучше подобрать тебе компанию.", reply_markup=bio_kb)
+        
+        bio_kb = ReplyKeyboardMarkup(keyboard=[[KeyboardButton(text="Пропустить шаг")]], resize_keyboard=True)
+        bio_text = ("💬 Расскажи немного о себе!\n\n"
+                    "Чем увлекаешься? Что любишь? С кем хотел бы познакомиться?\n\n"
+                    "Напиши несколько слов, чтобы другим было интереснее начать с тобой общение.\n\n"
+                    "Можно пропустить этот шаг.")
+        await m.answer(bio_text, reply_markup=bio_kb)
 
     @dp.message(Registration.bio)
     async def reg_bio(m: Message, state: FSMContext):
         text = (m.text or "").strip().lower()
-        bio_value = "" if text in ["пропустить", "пропустить фото"] else m.text
+        bio_value = "" if text in ["пропустить", "пропустить фото", "пропустить шаг"] else m.text
         await state.update_data(bio=bio_value)
         await state.set_state(Registration.photo)
         d = await state.get_data()
@@ -384,12 +410,9 @@ async def main():
             await db.add_match(conn, uid, target)
             other = await db.get_user(conn, target)
             me = await db.get_user(conn, uid)
-            
-            # ИСПРАВЛЕНО: Показываем анкету собеседника с кнопкой "Написать"
             await callback.message.answer("💚 <b>Взаимная симпатия!</b>\nВы понравились друг другу:", parse_mode="HTML")
             await show_profile(callback.message, other, mode="match")
             await callback.message.answer("🏠 Главное меню:", reply_markup=main_menu())
-            
             try:
                 await bot.send_message(target, f"💚 <b>Взаимная симпатия!</b>\nКому-то ты понравился! Написать: {user_link(me)}", parse_mode="HTML")
             except Exception:
@@ -478,6 +501,130 @@ async def main():
         await safe_delete(callback.message)
         await callback.message.answer("🏠 Главное меню", reply_markup=main_menu())
         await safe_answer(callback)
+
+    # ---------- ЧАТ-РУЛЕТКА ----------
+    @dp.message(F.text == "🎲 Чат-рулетка")
+    async def start_roulette(m: Message, state: FSMContext):
+        me = await db.get_user(conn, m.from_user.id)
+        if not me:
+            return await m.answer("Сначала создай анкету /start")
+            
+        partner_id = await db.roulette_get_partner(conn, m.from_user.id)
+        if partner_id:
+            return await m.answer("Ты уже в чате! Напиши сообщение или нажми кнопку ниже.", reply_markup=roulette_reply_kb())
+
+        msg = await m.answer("🔍 Ищем собеседника...")
+        partner_id = await db.roulette_join_queue(conn, m.from_user.id)
+        
+        if partner_id:
+            partner = await db.get_user(conn, partner_id)
+            if partner:
+                caption = profile_caption(partner)
+                await msg.delete()
+                await m.answer(
+                    f"🎉 Собеседник найден!\n\n{caption}\n\nНажми «Начать общение», чтобы поздороваться.",
+                    reply_markup=roulette_found_kb()
+                )
+                try:
+                    await bot.send_message(
+                        partner_id, 
+                        f"🎉 Собеседник найден!\n\n{profile_caption(me)}\n\nНажми «Начать общение», чтобы поздороваться.",
+                        reply_markup=roulette_found_kb()
+                    )
+                except Exception:
+                    pass
+        else:
+            await msg.edit_text("⏳ Ожидаем собеседника...\nКак только кто-то зайдет, мы сразу пришлем уведомление!")
+
+    @dp.callback_query(F.data == "roulette_start")
+    async def roulette_start_chat(callback: CallbackQuery):
+        uid = callback.from_user.id
+        partner_id = await db.roulette_get_partner(conn, uid)
+        if not partner_id:
+            return await safe_answer(callback, "Собеседник уже ушел.", show_alert=True)
+            
+        await safe_delete(callback.message)
+        await callback.message.answer("💬 Чат открыт! Напиши первое сообщение.", reply_markup=roulette_reply_kb())
+        await safe_answer(callback)
+        
+        try:
+            await bot.send_message(partner_id, "💬 Собеседник начал чат! Можешь отвечать.", reply_markup=roulette_reply_kb())
+        except Exception:
+            pass
+
+    @dp.callback_query(F.data.in_({"roulette_skip", "roulette_next"}))
+    async def roulette_skip(callback: CallbackQuery, state: FSMContext):
+        uid = callback.from_user.id
+        await safe_answer(callback, "Ищем нового собеседника...")
+        await safe_delete(callback.message)
+        
+        partner_id = await db.roulette_leave(conn, uid)
+        if partner_id:
+            try:
+                await bot.send_message(partner_id, "💔 Собеседник покинул чат. Ищем нового...", reply_markup=main_menu())
+            except Exception:
+                pass
+                
+        await start_roulette(callback.message, state)
+
+    @dp.callback_query(F.data == "roulette_exit")
+    async def roulette_exit(callback: CallbackQuery):
+        uid = callback.from_user.id
+        partner_id = await db.roulette_leave(conn, uid)
+        if partner_id:
+            try:
+                await bot.send_message(partner_id, "🚪 Собеседник вышел из чата.", reply_markup=main_menu())
+            except Exception:
+                pass
+        await safe_delete(callback.message)
+        await callback.message.answer("Ты вышел из рулетки.", reply_markup=main_menu())
+        await safe_answer(callback)
+
+    @dp.message(F.text == "🔄 Следующий")
+    async def roulette_btn_next(m: Message, state: FSMContext):
+        partner_id = await db.roulette_leave(conn, m.from_user.id)
+        if partner_id:
+            try:
+                await bot.send_message(partner_id, "💔 Собеседник покинул чат. Ищем нового...", reply_markup=main_menu())
+            except Exception:
+                pass
+        await m.answer("Ищем нового собеседника...")
+        await start_roulette(m, state)
+
+    @dp.message(F.text == "🚪 Выйти")
+    async def roulette_btn_exit(m: Message, state: FSMContext):
+        partner_id = await db.roulette_leave(conn, m.from_user.id)
+        if partner_id:
+            try:
+                await bot.send_message(partner_id, "🚪 Собеседник вышел из чата.", reply_markup=main_menu())
+            except Exception:
+                pass
+        await m.answer("Ты вышел из рулетки.", reply_markup=main_menu())
+
+    # Обработчик сообщений из рулетки
+    @dp.message(lambda m: not m.text.startswith("/") and m.text not in ["🔄 Следующий", "🚪 Выйти"])
+    async def roulette_message_handler(m: Message, state: FSMContext):
+        current_state = await state.get_state()
+        if current_state is not None:
+            return
+            
+        uid = m.from_user.id
+        partner_id = await db.roulette_get_partner(conn, uid)
+        
+        if partner_id:
+            text_lower = (m.text or "").lower()
+            if any(word in text_lower for word in STOP_WORDS):
+                return await m.answer("⚠️ Сообщение содержит запрещенные слова. Пожалуйста, соблюдайте правила общения.")
+                
+            try:
+                if m.text:
+                    await bot.send_message(partner_id, f"👤 Собеседник: {m.text}")
+                elif m.photo:
+                    await bot.send_photo(partner_id, m.photo[-1].file_id, caption="📷 Фото от собеседника")
+            except Exception:
+                await m.answer("Не удалось отправить сообщение. Возможно, собеседник заблокировал бота.")
+        else:
+            return
 
     # ---------- Премиум ----------
     @dp.message(F.text == "⭐ Премиум")
@@ -588,11 +735,9 @@ async def main():
         await safe_delete(callback.message)
         
         if matched:
-            # ИСПРАВЛЕНО: Показываем анкету с кнопкой "Написать"
             await callback.message.answer("💚 <b>Взаимная симпатия!</b>\nВы понравились друг другу:", parse_mode="HTML")
             await show_profile(callback.message, other, mode="match")
             await callback.message.answer("🏠 Главное меню:", reply_markup=main_menu())
-            
             try:
                 await bot.send_message(target, f"💚 <b>Взаимная симпатия!</b>\nКому-то ты понравился! Написать: {user_link(me)}", parse_mode="HTML")
             except Exception:
@@ -617,44 +762,6 @@ async def main():
         st = likes_state.get(uid)
         offset = st["offset"] if st else 0
         await render_incoming(callback.message, uid, offset)
-        await safe_answer(callback)
-
-    # ---------- Мои лайки ----------
-    async def render_my_likes(message: Message, uid, offset: int):
-        total = await db.count_my_likes(conn, uid)
-        if total == 0:
-            await message.answer("Ты пока никого не лайкнул.", reply_markup=main_menu())
-            return
-        if offset >= total: offset = total - 1
-        if offset < 0: offset = 0
-        rows = await db.my_likes(conn, uid, offset=offset, limit=1)
-        if not rows:
-            await message.answer("Больше нет.", reply_markup=main_menu())
-            return
-        likes_state[uid] = {"offset": offset, "kind": "mine"}
-        
-        # ИСПРАВЛЕНО: Используем чистый режим без кнопки "Написать"
-        await show_profile(message, rows[0], mode="my_likes")
-        
-        nav = likes_nav_kb(offset, total, "mylikes")
-        header = f"❤️ Мои лайки: {offset+1} из {total}\n(Ждем ответной симпатии)"
-        if nav:
-            await message.answer(header, reply_markup=nav)
-        else:
-            await message.answer(header, reply_markup=back_to_menu_kb())
-
-    @dp.message(F.text == "❤️ Мои лайки")
-    async def my_likes(m: Message):
-        await render_my_likes(m, m.from_user.id, 0)
-
-    @dp.callback_query(F.data.startswith("mylikes_page_"))
-    async def mylikes_page(callback: CallbackQuery):
-        try:
-            offset = int(callback.data.split("_")[-1])
-        except ValueError:
-            return await safe_answer(callback, "Ошибка.")
-        await safe_delete(callback.message)
-        await render_my_likes(callback.message, callback.from_user.id, offset)
         await safe_answer(callback)
 
     # ---------- Фильтр возраста ----------
@@ -864,7 +971,6 @@ async def main():
         await callback.message.answer(text, reply_markup=admin_back_kb(), parse_mode="HTML")
         await safe_answer(callback)
 
-    # ---------- Очистка БД (3 шага) ----------
     @dp.callback_query(F.data == "adm_clear_db", F.from_user.id.in_(ADMIN_IDS))
     async def adm_clear_db(callback: CallbackQuery):
         text = ("⚠️ <b>ВНИМАНИЕ!</b> ⚠️\n\n"
@@ -894,11 +1000,10 @@ async def main():
         
         try:
             await conn.execute("PRAGMA foreign_keys=OFF")
-            for table in ["reactions", "skipped_likes", "reports", "matches", "blocks", "users"]:
+            for table in ["reactions", "skipped_likes", "reports", "matches", "blocks", "users", "views", "roulette_rooms", "roulette_queue"]:
                 await conn.execute(f"DELETE FROM {table}")
             
             await conn.commit()
-            
             await conn.execute("VACUUM")
             await conn.commit()
             
@@ -920,7 +1025,6 @@ async def main():
                 reply_markup=admin_back_kb()
             )
 
-    # ---------- Жалобы ----------
     @dp.callback_query(F.data.startswith("adm_reports_"), F.from_user.id.in_(ADMIN_IDS))
     async def adm_reports(callback: CallbackQuery):
         try:
