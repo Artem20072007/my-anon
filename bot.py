@@ -5,7 +5,6 @@ from datetime import datetime, timezone, timedelta
 from dotenv import load_dotenv
 from aiogram import Bot, Dispatcher, F, BaseMiddleware
 from aiogram.filters import CommandStart, Command, StateFilter
-from aiogram.exceptions import TelegramBadRequest
 from aiogram.types import (Message, CallbackQuery, InputMediaPhoto, LabeledPrice,
                            PreCheckoutQuery, ReplyKeyboardMarkup, KeyboardButton, ReplyKeyboardRemove,
                            InlineKeyboardMarkup, InlineKeyboardButton)
@@ -43,21 +42,27 @@ def user_link(user):
 
 def profile_caption(p, stats=None):
     if not p or "name" not in p.keys(): return "Ошибка анкеты"
+    
+    # Красивая плашка Премиума
+    premium_mark = ""
+    if "premium_until" in p.keys() and p["premium_until"]:
+        from app.db import _parse_dt
+        pu = _parse_dt(p["premium_until"])
+        if pu and pu > datetime.now(timezone.utc): 
+            premium_mark = "🌟 Премиум пользователь!\n"
+            
     verified = " ✅" if p["is_verified"] else ""
     name = (p["name"] or "").strip().capitalize() or "Без имени"
     age = p["age"]
     city = (p["city"] or "").capitalize()
     bio = (p["bio"] or '').strip() if "bio" in p.keys() else ''
-    if bio.lower() in ["пропустить", "пропустить фото", "пропустить шаг", "без описания"]: bio = ""
     
-    premium_mark = ""
-    if "premium_until" in p.keys() and p["premium_until"]:
-        from app.db import _parse_dt
-        pu = _parse_dt(p["premium_until"])
-        if pu and pu > datetime.now(timezone.utc): premium_mark = " 🌟 Премиум"
+    if bio.lower() in ["пропустить", "пропустить фото", "пропустить шаг", "без описания"]: 
+        bio = ""
 
-    header = f"{name}{verified}{premium_mark}, {age}\n📍 {city}"
+    header = f"{premium_mark}{name}{verified}, {age}\n📍 {city}"
     header += f"\n💬 {bio}" if bio else "\n💬 Пока нет описания"
+    
     if stats:
         header += f"\n\n❤️ Лайки: {stats[0]}\n👀 Просмотры: {stats[1]}"
     return header
@@ -149,7 +154,7 @@ async def main():
     # ================= СТАРТ И ОТМЕНА =================
     @dp.message(CommandStart())
     async def start(m: Message, state: FSMContext):
-        await state.clear() # СБРОС СОСТОЯНИЯ
+        await state.clear()
         args = m.text.split()
         user = await db.get_user(conn, m.from_user.id)
         if not user:
@@ -341,12 +346,12 @@ async def main():
     # ================= REPLY-КНОПКИ ПРОФИЛЯ =================
     @dp.message(F.text == "🔙 Вернуться назад")
     async def prof_back(m: Message, state: FSMContext):
-        await state.clear() # ВАЖНО: СБРОС СОСТОЯНИЯ
+        await state.clear()
         await m.answer("🏠 Главное меню:", reply_markup=main_menu())
 
     @dp.message(F.text == "✏️ Изменить информацию")
     async def prof_edit_info(m: Message, state: FSMContext):
-        await state.clear() # ВАЖНО: СБРОС СОСТОЯНИЯ
+        await state.clear()
         await m.answer("✏️ Что хочешь изменить?", reply_markup=edit_menu_kb())
 
     @dp.message(F.text == "🎂 Фильтр возраста")
@@ -542,7 +547,6 @@ async def main():
             except Exception: pass
         await m.answer("Ты вышел из рулетки.", reply_markup=main_menu())
 
-    # ИСПРАВЛЕНО: строгий StateFilter(None) и проверка m.text на None
     @dp.message(StateFilter(None), lambda m: m.text and not m.text.startswith("/") and m.text not in ["🔄 Следующий", "🚪 Выйти"])
     async def roulette_message_handler(m: Message, state: FSMContext):
         uid = m.from_user.id
