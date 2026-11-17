@@ -1,4 +1,5 @@
 import aiosqlite
+import random
 from pathlib import Path
 from datetime import datetime, timezone, timedelta
 
@@ -63,7 +64,7 @@ CREATE TABLE IF NOT EXISTS blocks (
 CREATE INDEX IF NOT EXISTS idx_users_feed ON users(is_active, is_banned, city, age, gender);
 CREATE INDEX IF NOT EXISTS idx_reactions_to ON reactions(to_user_id, reaction);
 CREATE INDEX IF NOT EXISTS idx_reactions_from ON reactions(from_user_id);
-CREATE INDEX IF NOT EXISTS idx_reports_target ON reports(target_id);  -- FIX: ускоряет подсчёт жалоб
+CREATE INDEX IF NOT EXISTS idx_reports_target ON reports(target_id);
 '''
 
 def now():
@@ -86,7 +87,7 @@ async def connect():
     db.row_factory = aiosqlite.Row
     await db.execute("PRAGMA foreign_keys=ON")
     await db.execute("PRAGMA journal_mode=WAL")
-    await db.execute("PRAGMA busy_timeout=5000")  # FIX: меньше блокировок при параллельных запросах
+    await db.execute("PRAGMA busy_timeout=5000")
     await db.executescript(SCHEMA)
     try:
         await db.execute("ALTER TABLE users ADD COLUMN premium_until TEXT DEFAULT NULL")
@@ -105,19 +106,38 @@ async def is_banned(db, uid):
     return bool(row and row["is_banned"])
 
 async def save_user(db, data):
+    """Создаёт или обновляет анкету.
+    FIX: при UPDATE не сбрасываем is_active и возрастной фильтр,
+    если они не переданы явно в data.
+    """
     photos_str = ",".join(data.get("photos", []))
+    old = await get_user(db, data["user_id"])
+
+    # если правим существующего — берём is_active и фильтр из БД, если не переданы
+    if old:
+        is_active = data.get("is_active", old["is_active"])
+        target_age_min = data.get("target_age_min", old["target_age_min"])
+        target_age_max = data.get("target_age_max", old["target_age_max"])
+        referral_id = data.get("referral_id", old["referral_id"])
+    else:
+        is_active = 1
+        target_age_min = data.get("target_age_min", 14)
+        target_age_max = data.get("target_age_max", 99)
+        referral_id = data.get("referral_id")
+
     await db.execute('''INSERT INTO users
-    (user_id,username,name,age,gender,target_gender,target_age_min,target_age_max,city,bio,photos,video_id,referral_id,created_at)
-    VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?)
+    (user_id,username,name,age,gender,target_gender,target_age_min,target_age_max,city,bio,photos,video_id,referral_id,is_active,created_at)
+    VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
     ON CONFLICT(user_id) DO UPDATE SET 
     username=excluded.username,name=excluded.name,age=excluded.age,gender=excluded.gender,
     target_gender=excluded.target_gender,target_age_min=excluded.target_age_min,
     target_age_max=excluded.target_age_max,city=excluded.city,bio=excluded.bio,
-    photos=excluded.photos,video_id=excluded.video_id,is_active=1''',
-    (data["user_id"],data.get("username"),data["name"],data["age"],data["gender"],
-     data["target_gender"],data.get("target_age_min", 14),data.get("target_age_max", 99),
-     CITY,data.get("bio", ""),photos_str,data.get("video_id",""),data.get("referral_id"),
-     now()))
+    photos=excluded.photos,video_id=excluded.video_id,referral_id=excluded.referral_id,
+    is_active=excluded.is_active''',
+    (data["user_id"], data.get("username"), data["name"], data["age"], data["gender"],
+     data["target_gender"], target_age_min, target_age_max,
+     CITY, data.get("bio", ""), photos_str, data.get("video_id", ""), referral_id,
+     is_active, now()))
     await db.commit()
 
 async def next_profile(db, me, exclude_seen=True):
@@ -137,7 +157,6 @@ async def next_profile(db, me, exclude_seen=True):
              OR (b.blocker_id = :uid AND b.blocked_id = u.user_id))'''
     if exclude_seen:
         query += " AND NOT EXISTS (SELECT 1 FROM reactions r WHERE r.from_user_id = :uid AND r.to_user_id = u.user_id)"
-    # FIX: увеличил выборку и явно отсортировал по свежести, чтобы премиум-приоритет работал стабильнее
     query += " ORDER BY u.created_at DESC LIMIT 100"
     cur = await db.execute(query, params)
     rows = await cur.fetchall()
@@ -153,7 +172,6 @@ async def next_profile(db, me, exclude_seen=True):
         else:
             regular.append(row)
 
-    import random
     if premium:
         return random.choice(premium)
     return random.choice(regular) if regular else None
@@ -177,8 +195,30 @@ async def add_match(db, a, b):
     await db.execute("INSERT OR IGNORE INTO matches(user1_id,user2_id,created_at) VALUES(?,?,?)", (x, y, now()))
     await db.commit()
 
+async def like_back(db, uid, target):
+    """FIX: атомарно добавляет лайк и, если взаимно, матч.
+    Возвращает True, если матч создан.
+    """
+    try:
+        await db.execute(
+            "INSERT OR IGNORE INTO reactions(from_user_id,to_user_id,reaction,created_at) VALUES(?,?,'like',?)",
+            (uid, target, now()))
+        cur = await db.execute(
+            "SELECT 1 FROM reactions WHERE from_user_id=? AND to_user_id=? AND reaction='like'",
+            (target, uid))
+        mutual = await cur.fetchone()
+        if mutual:
+            x, y = sorted((uid, target))
+            await db.execute(
+                "INSERT OR IGNORE INTO matches(user1_id,user2_id,created_at) VALUES(?,?,?)",
+                (x, y, now()))
+        await db.commit()
+        return mutual is not None
+    except aiosqlite.Error:
+        await db.rollback()
+        return False
+
 async def incoming_likes(db, uid, offset=0, limit=1):
-    """Кто меня лайкнул, но я ещё не ответил и не пропустил. Постранично."""
     cur = await db.execute('''SELECT u.* FROM users u
       JOIN reactions r ON r.from_user_id = u.user_id
       WHERE r.to_user_id = ? AND r.reaction = 'like'
@@ -204,7 +244,6 @@ async def count_incoming_likes(db, uid):
     return row["n"] if row else 0
 
 async def skip_incoming_like(db, uid, target_id):
-    """Запоминает пропуск, чтобы анкета не возвращалась."""
     try:
         await db.execute("INSERT OR IGNORE INTO skipped_likes(user_id,target_id,created_at) VALUES(?,?,?)",
                          (uid, target_id, now()))
@@ -213,7 +252,6 @@ async def skip_incoming_like(db, uid, target_id):
         pass
 
 async def my_likes(db, uid, offset=0, limit=1):
-    """Кого я лайкнул — постранично."""
     cur = await db.execute('''SELECT u.* FROM users u
       JOIN reactions r ON r.to_user_id = u.user_id
       WHERE r.from_user_id = ? AND r.reaction = 'like'
@@ -249,7 +287,6 @@ async def block_user(db, blocker, blocked):
     await db.commit()
 
 async def undo_reaction(db, from_id, to_id):
-    """Удаляет реакцию. Матч удаляем только если взаимной реакции больше нет."""
     await db.execute("DELETE FROM reactions WHERE from_user_id=? AND to_user_id=?", (from_id, to_id))
     cur = await db.execute("SELECT 1 FROM reactions WHERE from_user_id=? AND to_user_id=? AND reaction='like'",
                            (to_id, from_id))
@@ -258,11 +295,9 @@ async def undo_reaction(db, from_id, to_id):
         x, y = sorted((from_id, to_id))
         await db.execute("DELETE FROM matches WHERE user1_id=? AND user2_id=?", (x, y))
     await db.commit()
-    # FIX: возвращаем True, если матч был удалён — чтобы можно было уведомить собеседника
     return not bool(mutual)
 
 async def get_last_reaction(db, from_id):
-    """Последний лайк за 30 мин, который НЕ стал матчем — его можно отменить."""
     time_limit = (datetime.now(timezone.utc) - timedelta(minutes=30)).isoformat()
     cur = await db.execute(
         """SELECT r.to_user_id FROM reactions r
@@ -279,7 +314,6 @@ async def verify_user(db, uid):
     await db.commit()
 
 async def set_referral(db, uid, ref_id):
-    """Возвращает True, если реферал записан впервые и ref_id != uid."""
     if uid == ref_id: return False
     cur = await db.execute("SELECT referral_id FROM users WHERE user_id=?", (uid,))
     row = await cur.fetchone()
@@ -290,7 +324,6 @@ async def set_referral(db, uid, ref_id):
     return False
 
 async def add_reward(db, uid, days):
-    """Начисляет дни премиума, продлевая текущий срок."""
     cur = await db.execute("SELECT premium_until FROM users WHERE user_id=?", (uid,))
     row = await cur.fetchone()
     if not row: return
@@ -313,7 +346,6 @@ async def check_premium(db, uid):
 async def set_premium(db, uid, days):
     await add_reward(db, uid, days)
 
-# FIX: отдельная функция для проверки, что лайк от b к a всё ещё существует
 async def has_like(db, from_id, to_id):
     cur = await db.execute(
         "SELECT 1 FROM reactions WHERE from_user_id=? AND to_user_id=? AND reaction='like'",
