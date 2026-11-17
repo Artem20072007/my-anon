@@ -1,7 +1,6 @@
 import asyncio
 import logging
 import os
-import random
 from datetime import datetime, timezone, timedelta
 from dotenv import load_dotenv
 from aiogram import Bot, Dispatcher, F, BaseMiddleware
@@ -23,11 +22,9 @@ MIN_AGE = 14
 MAX_AGE = 99
 CITY = "Чистополь"
 
-active_cards = {}   # uid -> (mode, target_id)
 user_photos = {}    # uid -> [file_id]
 likes_state = {}    # uid -> {"offset": int, "kind": "incoming"|"mine"}
 
-# FIX: безопасное удаление сообщения (двойной клик, старое сообщение и т.п.)
 async def safe_delete(message: Message):
     try:
         await message.delete()
@@ -36,7 +33,6 @@ async def safe_delete(message: Message):
     except Exception as e:
         logging.debug(f"safe_delete: {e}")
 
-# FIX: безопасный answer для CallbackQuery (чтобы не падало, если query устарел)
 async def safe_answer(callback: CallbackQuery, text: str = None, show_alert: bool = False):
     try:
         await callback.answer(text=text, show_alert=show_alert)
@@ -53,9 +49,9 @@ def user_link(user):
 def profile_caption(p):
     if not p or "name" not in p.keys(): return "Ошибка анкеты"
     verified = " ✅" if p["is_verified"] else ""
-    name = (p["name"] or "").strip().capitalize() or "Без имени"  # FIX: пустое имя
+    name = (p["name"] or "").strip().capitalize() or "Без имени"
     age = p["age"]
-    city = p["city"].capitalize()
+    city = (p["city"] or "").capitalize()
     bio = (p["bio"] or '').strip() if "bio" in p.keys() else ''
     if bio.lower() in ["пропустить", "пропустить фото", "без описания"]:
         bio = ""
@@ -67,12 +63,10 @@ async def show_profile(message: Message, p, mode="feed", extra_kb=None):
     if not p:
         await message.answer("Анкеты закончились.", reply_markup=main_menu())
         return
-    if mode in ("feed", "incoming"):
-        active_cards[message.chat.id] = (mode, p["user_id"])
     if mode == "feed":
-        markup = feed_kb()
+        markup = feed_kb(p["user_id"])
     elif mode == "incoming":
-        markup = incoming_kb()
+        markup = incoming_kb(p["user_id"])
     elif mode == "mine":
         markup = edit_profile_kb()
     elif mode == "liked":
@@ -94,7 +88,6 @@ async def show_profile(message: Message, p, mode="feed", extra_kb=None):
     else:
         await message.answer(caption, reply_markup=markup)
 
-# ---------- Middleware: бан ----------
 class BanMiddleware(BaseMiddleware):
     def __init__(self, conn): self.conn = conn
     async def __call__(self, handler, event, data):
@@ -105,19 +98,18 @@ class BanMiddleware(BaseMiddleware):
             elif isinstance(event, CallbackQuery):
                 await safe_answer(event, "🚫 Ты заблокирован.", show_alert=True)
             elif isinstance(event, PreCheckoutQuery):
-                # FIX: у PreCheckoutQuery нет .answer() — используем bot.answer_pre_checkout_query
-                bot: Bot = data.get("bot")
-                try:
-                    await bot.answer_pre_checkout_query(event.id, ok=False, error_message="Ты заблокирован.")
-                except Exception as e:
-                    logging.error(f"pre_checkout ban: {e}")
+                bot = data.get("bot")
+                if bot:
+                    try:
+                        await bot.answer_pre_checkout_query(event.id, ok=False, error_message="Ты заблокирован.")
+                    except Exception as e:
+                        logging.error(f"pre_checkout ban: {e}")
             return
         return await handler(event, data)
 
 async def start_registration(message: Message, state: FSMContext, is_edit=False, pending_ref=None):
     await state.clear()
     user_photos.pop(message.from_user.id, None)
-    # FIX: pending_ref передаём явно, без гонки через state.update_data
     init = {"user_id": message.from_user.id, "username": message.from_user.username,
             "photos": [], "is_edit": is_edit}
     if pending_ref:
@@ -127,7 +119,6 @@ async def start_registration(message: Message, state: FSMContext, is_edit=False,
     await message.answer("Привет! Давай создадим анкету. Какой у тебя пол?", reply_markup=gender_kb())
 
 async def notify_new_profiles(bot: Bot, conn):
-    # FIX: не спамим всем каждые 30 минут; шлём не чаще раза в 3 часа и только тем, кто давно не заходил
     last_notify = {}
     while True:
         await asyncio.sleep(1800)
@@ -143,11 +134,12 @@ async def notify_new_profiles(bot: Bot, conn):
                 "SELECT user_id, created_at FROM users WHERE is_active=1 AND is_banned=0")
             users = await cur.fetchall()
             now_dt = datetime.now(timezone.utc)
+            # FIX: чистим старые записи, чтобы dict не рос бесконечно
+            last_notify = {k: v for k, v in last_notify.items() if (now_dt - v) < timedelta(hours=24)}
             for u in users:
                 if u["created_at"] > thirty_mins_ago:
                     continue
                 uid = u["user_id"]
-                # FIX: не чаще раза в 3 часа
                 last = last_notify.get(uid)
                 if last and (now_dt - last) < timedelta(hours=3):
                     continue
@@ -224,7 +216,6 @@ async def main():
 
     @dp.message(Registration.name)
     async def reg_name(m: Message, state: FSMContext):
-        # FIX: strip и проверка на пустоту
         name = (m.text or "").strip()
         if not name or len(name) > 30:
             return await m.answer("Имя от 1 до 30 символов.")
@@ -342,7 +333,6 @@ async def main():
         if m.text == "✏️ Изменить анкету":
             d = await state.get_data()
             pending_ref = d.get("pending_ref")
-            # FIX: передаём pending_ref явно, без гонки
             await start_registration(m, state, is_edit=d.get("is_edit", False), pending_ref=pending_ref)
             return
         if m.text != "✅ Да, все верно":
@@ -368,17 +358,21 @@ async def main():
     async def feed(m: Message):
         me = await db.get_user(conn, m.from_user.id)
         if not me: return await m.answer("Сначала создай анкету /start")
+        likes_state.pop(m.from_user.id, None)
         p = await db.next_profile(conn, me)
         if p: await show_profile(m, p)
         else: await m.answer("Анкеты закончились. Заходи позже!", reply_markup=main_menu())
 
-    @dp.callback_query(F.data.in_({"like", "dislike"}))
+    # FIX: target_id в callback_data — не зависим от active_cards
+    @dp.callback_query(F.data.startswith("like:") | F.data.startswith("dislike:"))
     async def handle_reaction(callback: CallbackQuery):
         uid = callback.from_user.id
-        card = active_cards.pop(uid, None)
-        if not card or card[0] != "feed":
-            return await safe_answer(callback, "Анкета уже неактивна.")
-        target, reaction = card[1], callback.data
+        try:
+            action, target_str = callback.data.split(":", 1)
+            target = int(target_str)
+        except (ValueError, IndexError):
+            return await safe_answer(callback, "Ошибка кнопки.")
+        reaction = action
         await safe_delete(callback.message)
         await db.add_reaction(conn, uid, target, reaction)
         if reaction == "like" and await db.mutual_like(conn, uid, target):
@@ -403,7 +397,6 @@ async def main():
         if not last_target_id:
             return await safe_answer(callback, "Нечего отменять (или прошло 30 минут).", show_alert=True)
         match_removed = await db.undo_reaction(conn, uid, last_target_id)
-        # FIX: если матч удалён — сообщаем собеседнику, что взаимность отменена
         if match_removed:
             try:
                 await bot.send_message(
@@ -425,18 +418,20 @@ async def main():
 
     @dp.callback_query(F.data == "sleep")
     async def handle_sleep(callback: CallbackQuery):
-        active_cards.pop(callback.from_user.id, None)
         await conn.execute("UPDATE users SET is_active=0 WHERE user_id=?", (callback.from_user.id,))
         await conn.commit()
         await safe_delete(callback.message)
         await callback.message.answer("Ты скрыл анкету из поиска.", reply_markup=main_menu())
         await safe_answer(callback, "Анкета скрыта")
 
-    @dp.callback_query(F.data == "report")
+    # FIX: target_id в callback_data
+    @dp.callback_query(F.data.startswith("report:"))
     async def handle_report(callback: CallbackQuery):
-        card = active_cards.pop(callback.from_user.id, None)
-        if not card: return await safe_answer(callback, "Ошибка.")
-        await db.add_report(conn, callback.from_user.id, card[1], "Жалоба из ленты")
+        try:
+            target = int(callback.data.split(":", 1)[1])
+        except (ValueError, IndexError):
+            return await safe_answer(callback, "Ошибка.")
+        await db.add_report(conn, callback.from_user.id, target, "Жалоба из ленты")
         await safe_delete(callback.message)
         await safe_answer(callback, "Жалоба отправлена модератору.")
         me = await db.get_user(conn, callback.from_user.id)
@@ -444,11 +439,13 @@ async def main():
         if p: await show_profile(callback.message, p)
         else: await callback.message.answer("Анкеты закончились.", reply_markup=main_menu())
 
-    @dp.callback_query(F.data == "block")
+    @dp.callback_query(F.data.startswith("block:"))
     async def handle_block(callback: CallbackQuery):
-        card = active_cards.pop(callback.from_user.id, None)
-        if not card: return await safe_answer(callback, "Ошибка.")
-        await db.block_user(conn, callback.from_user.id, card[1])
+        try:
+            target = int(callback.data.split(":", 1)[1])
+        except (ValueError, IndexError):
+            return await safe_answer(callback, "Ошибка.")
+        await db.block_user(conn, callback.from_user.id, target)
         await safe_delete(callback.message)
         await safe_answer(callback, "Пользователь заблокирован.")
         me = await db.get_user(conn, callback.from_user.id)
@@ -456,9 +453,9 @@ async def main():
         if p: await show_profile(callback.message, p)
         else: await callback.message.answer("Анкеты закончились.", reply_markup=main_menu())
 
-    # FIX: кнопка «В меню» из навигации
     @dp.callback_query(F.data == "go_menu")
     async def go_menu(callback: CallbackQuery):
+        likes_state.pop(callback.from_user.id, None)
         await safe_delete(callback.message)
         await callback.message.answer("🏠 Главное меню", reply_markup=main_menu())
         await safe_answer(callback)
@@ -469,11 +466,11 @@ async def main():
         is_prem = await db.check_premium(conn, m.from_user.id)
         status = "✅ У тебя активен Премиум!" if is_prem else "❌ У тебя нет Премиума."
         text = (f"{status}\n\nЧто дает Премиум:\n"
-                "1. Видишь *ВСЕХ*, кто тебя лайкнул.\n"
+                "1. Видишь <b>ВСЕХ</b>, кто тебя лайкнул.\n"
                 "2. Твоя анкета показывается первой.\n"
                 "3. Возможность отменять лайки без ограничений.\n\n"
                 "Выбери тариф:")
-        await m.answer(text, reply_markup=premium_kb(), parse_mode="Markdown")
+        await m.answer(text, reply_markup=premium_kb(), parse_mode="HTML")
 
     @dp.callback_query(F.data.startswith("buy_premium_"))
     async def buy_premium(callback: CallbackQuery):
@@ -512,7 +509,7 @@ async def main():
         await db.set_premium(conn, m.from_user.id, days)
         await m.answer(f"🎉 Спасибо за покупку! Премиум активирован на {days} дней.")
 
-    # ---------- Кто меня лайкнул (постранично) ----------
+    # ---------- Кто меня лайкнул ----------
     async def render_incoming(message: Message, uid, offset: int):
         total = await db.count_incoming_likes(conn, uid)
         if total == 0:
@@ -536,7 +533,6 @@ async def main():
         header = f"💖 Кто меня лайкнул: {offset+1} из {total}"
         if not is_prem and total > 1:
             header += "\n🔒 Премиум — листать всех."
-        # FIX: если навигации нет — показываем клавиатуру «в меню», чтобы не терять меню
         if nav:
             await message.answer(header, reply_markup=nav)
         else:
@@ -548,57 +544,59 @@ async def main():
 
     @dp.callback_query(F.data.startswith("incoming_page_"))
     async def incoming_page(callback: CallbackQuery):
-        offset = int(callback.data.split("_")[-1])
+        try:
+            offset = int(callback.data.split("_")[-1])
+        except ValueError:
+            return await safe_answer(callback, "Ошибка.")
         await safe_delete(callback.message)
         await render_incoming(callback.message, callback.from_user.id, offset)
         await safe_answer(callback)
 
-    @dp.callback_query(F.data == "like_back")
+    # FIX: target_id в callback_data
+    @dp.callback_query(F.data.startswith("like_back:"))
     async def cb_like_back(callback: CallbackQuery):
         uid = callback.from_user.id
-        card = active_cards.pop(uid, None)
-        if not card or card[0] != "incoming":
+        try:
+            target = int(callback.data.split(":", 1)[1])
+        except (ValueError, IndexError):
             return await safe_answer(callback, "Ошибка.")
-        target = card[1]
         other = await db.get_user(conn, target)
         if not other or other["is_banned"]:
             await safe_delete(callback.message)
             await safe_answer(callback, "Анкета недоступна.")
             return
-        # FIX: проверяем, что лайк от target ещё существует
-        still_liked = await db.has_like(conn, target, uid)
-        await db.add_reaction(conn, uid, target, "like")
-        if still_liked:
-            await db.add_match(conn, uid, target)
+        # FIX: атомарная операция — без race condition
+        matched = await db.like_back(conn, uid, target)
         me = await db.get_user(conn, uid)
         await safe_delete(callback.message)
-        if still_liked:
+        if matched:
             await callback.message.answer(f"💚 Взаимно! Написать: {user_link(other)}", reply_markup=main_menu())
             try:
                 await bot.send_message(target, f"💚 Взаимно! Написать: {user_link(me)}")
             except Exception:
                 pass
         else:
-            # FIX: собеседник уже отменил лайк — просто лайкаем, без матча и без уведомления
             await callback.message.answer("Ты лайкнул эту анкету.", reply_markup=main_menu())
         await safe_answer(callback)
         st = likes_state.get(uid)
         if st:
             await render_incoming(callback.message, uid, st["offset"])
 
-    @dp.callback_query(F.data == "skip")
+    @dp.callback_query(F.data.startswith("skip:"))
     async def cb_skip(callback: CallbackQuery):
         uid = callback.from_user.id
-        card = active_cards.pop(uid, None)
-        if card and card[0] == "incoming":
-            await db.skip_incoming_like(conn, uid, card[1])
+        try:
+            target = int(callback.data.split(":", 1)[1])
+        except (ValueError, IndexError):
+            return await safe_answer(callback, "Ошибка.")
+        await db.skip_incoming_like(conn, uid, target)
         await safe_delete(callback.message)
         st = likes_state.get(uid)
         offset = st["offset"] if st else 0
         await render_incoming(callback.message, uid, offset)
         await safe_answer(callback)
 
-    # ---------- Мои лайки (постранично) ----------
+    # ---------- Мои лайки ----------
     async def render_my_likes(message: Message, uid, offset: int):
         total = await db.count_my_likes(conn, uid)
         if total == 0:
@@ -614,7 +612,6 @@ async def main():
         await show_profile(message, rows[0], mode="liked")
         nav = likes_nav_kb(offset, total, "mylikes")
         header = f"❤️ Мои лайки: {offset+1} из {total}"
-        # FIX: всегда показываем хоть какую-то клавиатуру
         if nav:
             await message.answer(header, reply_markup=nav)
         else:
@@ -626,7 +623,10 @@ async def main():
 
     @dp.callback_query(F.data.startswith("mylikes_page_"))
     async def mylikes_page(callback: CallbackQuery):
-        offset = int(callback.data.split("_")[-1])
+        try:
+            offset = int(callback.data.split("_")[-1])
+        except ValueError:
+            return await safe_answer(callback, "Ошибка.")
         await safe_delete(callback.message)
         await render_my_likes(callback.message, callback.from_user.id, offset)
         await safe_answer(callback)
