@@ -7,7 +7,8 @@ from aiogram import Bot, Dispatcher, F, BaseMiddleware
 from aiogram.filters import CommandStart, Command, StateFilter
 from aiogram.exceptions import TelegramBadRequest
 from aiogram.types import (Message, CallbackQuery, InputMediaPhoto, LabeledPrice,
-                           PreCheckoutQuery, ReplyKeyboardMarkup, KeyboardButton, ReplyKeyboardRemove)
+                           PreCheckoutQuery, ReplyKeyboardMarkup, KeyboardButton, ReplyKeyboardRemove,
+                           InlineKeyboardMarkup, InlineKeyboardButton)
 from aiogram.fsm.context import FSMContext
 from aiogram.fsm.storage.memory import MemoryStorage
 from app import db
@@ -134,7 +135,6 @@ async def notify_new_profiles(bot: Bot, conn):
                 "SELECT user_id, created_at FROM users WHERE is_active=1 AND is_banned=0")
             users = await cur.fetchall()
             now_dt = datetime.now(timezone.utc)
-            # FIX: чистим старые записи, чтобы dict не рос бесконечно
             last_notify = {k: v for k, v in last_notify.items() if (now_dt - v) < timedelta(hours=24)}
             for u in users:
                 if u["created_at"] > thirty_mins_ago:
@@ -341,7 +341,8 @@ async def main():
         if not d.get("photos") and not d.get("video_id"):
             return await m.answer("❌ Нельзя создать анкету без фото или видео! Отправь фото или видео.")
         pending_ref = d.get("pending_ref")
-        d["referral_id"] = pending_ref
+        if pending_ref:
+            d["referral_id"] = pending_ref
         await db.save_user(conn, d)
         if pending_ref:
             try:
@@ -363,7 +364,6 @@ async def main():
         if p: await show_profile(m, p)
         else: await m.answer("Анкеты закончились. Заходи позже!", reply_markup=main_menu())
 
-    # FIX: target_id в callback_data — не зависим от active_cards
     @dp.callback_query(F.data.startswith("like:") | F.data.startswith("dislike:"))
     async def handle_reaction(callback: CallbackQuery):
         uid = callback.from_user.id
@@ -424,14 +424,22 @@ async def main():
         await callback.message.answer("Ты скрыл анкету из поиска.", reply_markup=main_menu())
         await safe_answer(callback, "Анкета скрыта")
 
-    # FIX: target_id в callback_data
     @dp.callback_query(F.data.startswith("report:"))
     async def handle_report(callback: CallbackQuery):
         try:
             target = int(callback.data.split(":", 1)[1])
         except (ValueError, IndexError):
             return await safe_answer(callback, "Ошибка.")
-        await db.add_report(conn, callback.from_user.id, target, "Жалоба из ленты")
+        result = await db.add_report(conn, callback.from_user.id, target, "Жалоба из ленты")
+        if result:
+            count, auto_banned = result
+            if auto_banned:
+                for admin_id in ADMIN_IDS:
+                    try:
+                        await bot.send_message(admin_id, f"🚨 <b>Автобан!</b>\nЮзер <code>{target}</code> получил 3 жалобы и был забанен.", parse_mode="HTML")
+                    except Exception:
+                        pass
+
         await safe_delete(callback.message)
         await safe_answer(callback, "Жалоба отправлена модератору.")
         me = await db.get_user(conn, callback.from_user.id)
@@ -529,7 +537,7 @@ async def main():
         p = rows[0]
         likes_state[uid] = {"offset": offset, "kind": "incoming"}
         await show_profile(message, p, mode="incoming")
-        nav = likes_nav_kb(offset, total, "incoming")
+        nav = likes_nav_kb(offset, total, "incoming") if is_prem else None
         header = f"💖 Кто меня лайкнул: {offset+1} из {total}"
         if not is_prem and total > 1:
             header += "\n🔒 Премиум — листать всех."
@@ -552,7 +560,6 @@ async def main():
         await render_incoming(callback.message, callback.from_user.id, offset)
         await safe_answer(callback)
 
-    # FIX: target_id в callback_data
     @dp.callback_query(F.data.startswith("like_back:"))
     async def cb_like_back(callback: CallbackQuery):
         uid = callback.from_user.id
@@ -565,7 +572,6 @@ async def main():
             await safe_delete(callback.message)
             await safe_answer(callback, "Анкета недоступна.")
             return
-        # FIX: атомарная операция — без race condition
         matched = await db.like_back(conn, uid, target)
         me = await db.get_user(conn, uid)
         await safe_delete(callback.message)
@@ -609,9 +615,12 @@ async def main():
             await message.answer("Больше нет.", reply_markup=main_menu())
             return
         likes_state[uid] = {"offset": offset, "kind": "mine"}
-        await show_profile(message, rows[0], mode="liked")
+        
+        # ИСПРАВЛЕНИЕ: Используем mode="feed" и простую клавиатуру вместо кнопки "Написать"
+        await show_profile(message, rows[0], mode="feed", extra_kb=my_likes_kb())
+        
         nav = likes_nav_kb(offset, total, "mylikes")
-        header = f"❤️ Мои лайки: {offset+1} из {total}"
+        header = f"❤️ Мои лайки: {offset+1} из {total}\n(Ждем ответной симпатии)"
         if nav:
             await message.answer(header, reply_markup=nav)
         else:
@@ -803,7 +812,6 @@ async def main():
         await m.answer("Помощь: лайкай анкеты. Контакты только при взаимности. В меню есть фильтр возраста, премиум и приглашение друзей.", reply_markup=main_menu())
 
     # ---------- Админка ----------
-       # ---------- Админка ----------
     @dp.message(Command("admin"), F.from_user.id.in_(ADMIN_IDS))
     async def admin_panel(m: Message):
         await m.answer("👑 <b>Админ-панель</b>\nВыбери действие:", reply_markup=admin_menu_kb(), parse_mode="HTML")
@@ -872,6 +880,10 @@ async def main():
             await conn.execute("PRAGMA foreign_keys=OFF")
             for table in ["reactions", "skipped_likes", "reports", "matches", "blocks", "users"]:
                 await conn.execute(f"DELETE FROM {table}")
+            
+            # ВАЖНО: Коммитим удаление ДО вызова VACUUM, чтобы избежать ошибки "cannot VACUUM from within a transaction"
+            await conn.commit()
+            
             await conn.execute("VACUUM")
             await conn.commit()
             
