@@ -803,20 +803,169 @@ async def main():
         await m.answer("Помощь: лайкай анкеты. Контакты только при взаимности. В меню есть фильтр возраста, премиум и приглашение друзей.", reply_markup=main_menu())
 
     # ---------- Админка ----------
+       # ---------- Админка ----------
     @dp.message(Command("admin"), F.from_user.id.in_(ADMIN_IDS))
     async def admin_panel(m: Message):
-        cur = await conn.execute("SELECT COUNT(*) n FROM users")
-        u = (await cur.fetchone())["n"]
-        cur = await conn.execute("SELECT COUNT(*) n FROM reports")
-        r = (await cur.fetchone())["n"]
-        await m.answer(f"👑 Админ\nЮзеров: {u}\nЖалоб: {r}\n\n/verify <id> — верифицировать\n/ban <id> — забанить\n/unban <id> — разбанить")
+        await m.answer("👑 <b>Админ-панель</b>\nВыбери действие:", reply_markup=admin_menu_kb(), parse_mode="HTML")
 
+    @dp.callback_query(F.data == "adm_close", F.from_user.id.in_(ADMIN_IDS))
+    async def adm_close(callback: CallbackQuery):
+        await safe_delete(callback.message)
+        await safe_answer(callback, "Закрыто.")
+
+    @dp.callback_query(F.data == "adm_menu", F.from_user.id.in_(ADMIN_IDS))
+    async def adm_menu(callback: CallbackQuery):
+        await safe_delete(callback.message)
+        await callback.message.answer("👑 <b>Админ-панель</b>\nВыбери действие:", reply_markup=admin_menu_kb(), parse_mode="HTML")
+        await safe_answer(callback)
+
+    @dp.callback_query(F.data == "adm_stats", F.from_user.id.in_(ADMIN_IDS))
+    async def adm_stats(callback: CallbackQuery):
+        cur = await conn.execute("SELECT COUNT(*) n FROM users")
+        total = (await cur.fetchone())["n"]
+        cur = await conn.execute("SELECT COUNT(*) n FROM users WHERE is_banned=0")
+        not_banned = (await cur.fetchone())["n"]
+        cur = await conn.execute("SELECT COUNT(*) n FROM reports")
+        reports = (await cur.fetchone())["n"]
+        cur = await conn.execute("SELECT COUNT(*) n FROM matches")
+        matches = (await cur.fetchone())["n"]
+        
+        text = (f"📊 <b>Статистика</b>\n\n"
+                f"👥 Всего юзеров: {total}\n"
+                f"✅ Активных: {not_banned}\n"
+                f"❤️ Матчей: {matches}\n"
+                f"🚨 Жалоб: {reports}")
+        await safe_delete(callback.message)
+        await callback.message.answer(text, reply_markup=admin_back_kb(), parse_mode="HTML")
+        await safe_answer(callback)
+
+    # ---------- Очистка БД (3 шага) ----------
+    @dp.callback_query(F.data == "adm_clear_db", F.from_user.id.in_(ADMIN_IDS))
+    async def adm_clear_db(callback: CallbackQuery):
+        text = ("⚠️ <b>ВНИМАНИЕ!</b> ⚠️\n\n"
+                "Ты собираешься <b>ПОЛНОСТЬЮ ОЧИСТИТЬ БАЗУ ДАННЫХ</b>.\n"
+                "Это удалит ВСЕХ пользователей, их анкеты, фото, лайки, матчи и жалобы.\n\n"
+                "Это действие <b>НЕЛЬЗЯ ОТМЕНИТЬ</b>.\n\n"
+                "Шаг 1 из 3: Ты действительно хочешь это сделать?")
+        await safe_delete(callback.message)
+        await callback.message.answer(text, reply_markup=admin_clear_confirm1_kb(), parse_mode="HTML")
+        await safe_answer(callback)
+
+    @dp.callback_query(F.data == "adm_clear_step2", F.from_user.id.in_(ADMIN_IDS))
+    async def adm_clear_step2(callback: CallbackQuery):
+        text = ("🛑 <b>Шаг 2 из 3</b>\n\n"
+                "Чтобы подтвердить, что ты понимаешь последствия, нажми на красную кнопку ниже.\n\n"
+                "После этого база будет стёрта.")
+        await safe_delete(callback.message)
+        await callback.message.answer(text, reply_markup=admin_clear_confirm2_kb(), parse_mode="HTML")
+        await safe_answer(callback)
+
+    @dp.callback_query(F.data == "adm_clear_final", F.from_user.id.in_(ADMIN_IDS))
+    async def adm_clear_final(callback: CallbackQuery):
+        await safe_delete(callback.message)
+        await safe_answer(callback, "Очистка началась...")
+        
+        msg = await callback.message.answer("⏳ Удаляю данные из БД...")
+        
+        try:
+            # Отключаем внешние ключи, чтобы удалить таблицы в любом порядке
+            await conn.execute("PRAGMA foreign_keys=OFF")
+            for table in ["reactions", "skipped_likes", "reports", "matches", "blocks", "users"]:
+                await conn.execute(f"DELETE FROM {table}")
+            await conn.execute("VACUUM")
+            await conn.commit()
+            
+            # Очищаем оперативную память
+            user_photos.clear()
+            likes_state.clear()
+            
+            await msg.edit_text(
+                "✅ <b>База данных успешно очищена!</b>\n\n"
+                "Все пользователи и их данные удалены. Бот готов к приёму новых анкет.",
+                parse_mode="HTML",
+                reply_markup=admin_back_kb()
+            )
+        except Exception as e:
+            logging.error(f"Ошибка очистки БД: {e}")
+            await msg.edit_text(
+                f"❌ <b>Ошибка при очистке:</b>\n<code>{e}</code>\n\n"
+                "Возможно, база заблокирована. Попробуй остановить бота и удалить файл вручную.",
+                parse_mode="HTML",
+                reply_markup=admin_back_kb()
+            )
+
+    # ---------- Жалобы ----------
+    @dp.callback_query(F.data.startswith("adm_reports_"), F.from_user.id.in_(ADMIN_IDS))
+    async def adm_reports(callback: CallbackQuery):
+        try:
+            offset = int(callback.data.split("_")[-1])
+        except ValueError:
+            offset = 0
+            
+        cur = await conn.execute(
+            "SELECT reporter_id, target_id, reason, created_at FROM reports ORDER BY id DESC LIMIT 1 OFFSET ?",
+            (offset,))
+        row = await cur.fetchone()
+        cur = await conn.execute("SELECT COUNT(*) n FROM reports")
+        total = (await cur.fetchone())["n"]
+        
+        if not row:
+            await safe_delete(callback.message)
+            await callback.message.answer("Жалоб нет.", reply_markup=admin_back_kb())
+            return await safe_answer(callback)
+            
+        text = (f"🚨 <b>Жалоба {offset+1} из {total}</b>\n\n"
+                f"👤 От: <code>{row['reporter_id']}</code>\n"
+                f"🎯 На: <code>{row['target_id']}</code>\n"
+                f"📝 Причина: {row['reason']}\n"
+                f"🕒 Дата: {row['created_at'][:19]}")
+        
+        # Кнопки для действий с жалобой
+        kb = InlineKeyboardMarkup(inline_keyboard=[
+            [InlineKeyboardButton(text="🚫 Забанить нарушителя", callback_data=f"adm_ban:{row['target_id']}")],
+            [InlineKeyboardButton(text="✅ Игнорировать", callback_data=f"adm_ignore:{row['target_id']}")],
+            [InlineKeyboardButton(text="⬅️ Назад", callback_data="adm_menu")]
+        ])
+        
+        await safe_delete(callback.message)
+        await callback.message.answer(text, reply_markup=kb, parse_mode="HTML")
+        await safe_answer(callback)
+
+    @dp.callback_query(F.data.startswith("adm_ban:"), F.from_user.id.in_(ADMIN_IDS))
+    async def adm_ban(callback: CallbackQuery):
+        try:
+            target = int(callback.data.split(":", 1)[1])
+        except (ValueError, IndexError):
+            return await safe_answer(callback, "Ошибка.")
+            
+        cur = await conn.execute("SELECT user_id FROM users WHERE user_id=?", (target,))
+        if not await cur.fetchone():
+            return await safe_answer(callback, "Юзер не найден.", show_alert=True)
+            
+        await conn.execute("UPDATE users SET is_banned=1, is_active=0 WHERE user_id=?", (target,))
+        await conn.commit()
+        
+        try:
+            await bot.send_message(target, "🚫 Ты забанен за нарушение правил.")
+        except Exception:
+            pass
+            
+        await safe_answer(callback, f"Юзер {target} забанен.", show_alert=True)
+
+    @dp.callback_query(F.data.startswith("adm_ignore:"), F.from_user.id.in_(ADMIN_IDS))
+    async def adm_ignore(callback: CallbackQuery):
+        await safe_answer(callback, "Жалоба проигнорирована.")
+
+    # Оставляем старые текстовые команды для удобства
     @dp.message(Command("verify"), F.from_user.id.in_(ADMIN_IDS))
     async def admin_verify(m: Message):
         try:
             uid = int(m.text.split()[1])
         except (IndexError, ValueError):
             return await m.answer("Использование: /verify <id>")
+        cur = await conn.execute("SELECT 1 FROM users WHERE user_id=?", (uid,))
+        if not await cur.fetchone():
+            return await m.answer(f"❌ Юзер {uid} не найден.")
         await db.verify_user(conn, uid)
         await m.answer(f"✅ Юзер {uid} верифицирован.")
 
@@ -826,8 +975,15 @@ async def main():
             uid = int(m.text.split()[1])
         except (IndexError, ValueError):
             return await m.answer("Использование: /ban <id>")
+        cur = await conn.execute("SELECT 1 FROM users WHERE user_id=?", (uid,))
+        if not await cur.fetchone():
+            return await m.answer(f"❌ Юзер {uid} не найден.")
         await conn.execute("UPDATE users SET is_banned=1, is_active=0 WHERE user_id=?", (uid,))
         await conn.commit()
+        try:
+            await bot.send_message(uid, "🚫 Ты забанен за нарушение правил.")
+        except Exception:
+            pass
         await m.answer(f"🚫 Юзер {uid} забанен.")
 
     @dp.message(Command("unban"), F.from_user.id.in_(ADMIN_IDS))
@@ -836,6 +992,9 @@ async def main():
             uid = int(m.text.split()[1])
         except (IndexError, ValueError):
             return await m.answer("Использование: /unban <id>")
+        cur = await conn.execute("SELECT 1 FROM users WHERE user_id=?", (uid,))
+        if not await cur.fetchone():
+            return await m.answer(f"❌ Юзер {uid} не найден.")
         await conn.execute("UPDATE users SET is_banned=0 WHERE user_id=?", (uid,))
         await conn.commit()
         await m.answer(f"✅ Юзер {uid} разбанен.")
