@@ -37,7 +37,7 @@ def main_menu():
         [KeyboardButton(text="⭐ Премиум"), KeyboardButton(text="🔗 Пригласить друга")]
     ], resize_keyboard=True)
 
-# --- МЕНЮ ПРОФИЛЯ (Reply, как на скрине 2) ---
+# --- МЕНЮ ПРОФИЛЯ (Reply, как на скрине 2, БЕЗ ПРЕМИУМА) ---
 def profile_menu_kb():
     return ReplyKeyboardMarkup(keyboard=[
         [KeyboardButton(text="✏️ Изменить информацию")],
