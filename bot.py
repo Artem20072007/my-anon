@@ -43,7 +43,6 @@ def user_link(user):
 def profile_caption(p, stats=None):
     if not p or "name" not in p.keys(): return "Ошибка анкеты"
     
-    # Красивая плашка Премиума
     premium_mark = ""
     if "premium_until" in p.keys() and p["premium_until"]:
         from app.db import _parse_dt
@@ -71,10 +70,15 @@ async def show_profile(message: Message, p, mode="feed", extra_kb=None):
     if not p:
         await message.answer("Анкеты закончились.", reply_markup=main_menu())
         return
+        
     if mode == "feed": markup = feed_kb(p["user_id"])
     elif mode == "incoming": markup = incoming_kb(p["user_id"])
     elif mode == "mine": markup = profile_menu_kb()
-    elif mode == "match": markup = InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text="💬 Написать", url=user_link(p))]])
+    elif mode == "match": 
+        link = user_link(p)
+        markup = InlineKeyboardMarkup(inline_keyboard=[
+            [InlineKeyboardButton(text="💬 Написать сообщение", url=link)]
+        ])
     else: markup = extra_kb
         
     stats = await db.get_profile_stats(conn, p["user_id"])
@@ -426,9 +430,13 @@ async def main():
             await db.add_match(conn, uid, target)
             other = await db.get_user(conn, target)
             me = await db.get_user(conn, uid)
+            
             await callback.message.answer("💚 <b>Взаимная симпатия!</b>", parse_mode="HTML")
             await show_profile(callback.message, other, mode="match")
-            try: await bot.send_message(target, f"💚 Взаимная симпатия! Написать: {user_link(me)}")
+            
+            try:
+                kb = InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text="💬 Написать сообщение", url=user_link(me))]])
+                await bot.send_message(target, "💚 <b>Взаимная симпатия!</b>\n\nНажми на кнопку ниже, чтобы начать общение.", parse_mode="HTML", reply_markup=kb)
             except Exception: pass
                 
         me = await db.get_user(conn, uid)
@@ -596,13 +604,18 @@ async def main():
         matched = await db.like_back(conn, uid, target)
         me = await db.get_user(conn, uid)
         await safe_delete(callback.message)
+        
         if matched:
             await callback.message.answer("💚 <b>Взаимная симпатия!</b>", parse_mode="HTML")
             await show_profile(callback.message, other, mode="match")
-            try: await bot.send_message(target, f"💚 Взаимная симпатия! Написать: {user_link(me)}")
+            
+            try:
+                kb = InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text="💬 Написать сообщение", url=user_link(me))]])
+                await bot.send_message(target, "💚 <b>Взаимная симпатия!</b>\n\nНажми на кнопку ниже, чтобы начать общение.", parse_mode="HTML", reply_markup=kb)
             except Exception: pass
         else:
             await callback.message.answer("Ты лайкнул анкету.", reply_markup=main_menu())
+            
         await safe_answer(callback)
         st = likes_state.get(uid)
         if st: await render_incoming(callback.message, uid, st["offset"])
