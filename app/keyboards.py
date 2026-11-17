@@ -121,3 +121,8 @@ def admin_clear_confirm2_kb():
         [InlineKeyboardButton(text="💀 УДАЛИТЬ ВСЁ ОКОНЧАТЕЛЬНО", callback_data="adm_clear_final")],
         [InlineKeyboardButton(text="❌ Отмена", callback_data="adm_menu")]
     ])
+
+def my_likes_kb():
+    return InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text="🏠 В меню", callback_data="go_menu")]
+    ])
