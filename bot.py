@@ -3,9 +3,9 @@ import logging
 import os
 from datetime import datetime, timezone, timedelta
 from dotenv import load_dotenv
-from aiogram import Bot, Dispatcher, F
+from aiogram import Bot, Dispatcher, F, BaseMiddleware
 from aiogram.filters import CommandStart, Command, StateFilter
-from aiogram.types import (Message, CallbackQuery, InputMediaPhoto, LabeledPrice, 
+from aiogram.types import (Message, CallbackQuery, InputMediaPhoto, LabeledPrice,
                            PreCheckoutQuery, ReplyKeyboardMarkup, KeyboardButton, ReplyKeyboardRemove)
 from aiogram.fsm.context import FSMContext
 from aiogram.fsm.storage.memory import MemoryStorage
@@ -21,14 +21,15 @@ MIN_AGE = 14
 MAX_AGE = 99
 CITY = "Чистополь"
 
-active_cards = {}
-user_photos = {} 
+active_cards = {}   # uid -> (mode, target_id)
+user_photos = {}    # uid -> [file_id]
+likes_state = {}    # uid -> {"offset": int, "kind": "incoming"|"mine"}
 
 def user_link(user):
     if "username" in user.keys() and user["username"]:
         return f"https://t.me/{user['username']}"
     return f"tg://user?id={user['user_id']}"
-  
+
 def profile_caption(p):
     if not p or "name" not in p.keys(): return "Ошибка анкеты"
     verified = " ✅" if p["is_verified"] else ""
@@ -42,26 +43,27 @@ def profile_caption(p):
         return f"{name}{verified}, {age}, {city} — {bio}"
     return f"{name}{verified}, {age}, {city}"
 
-async def show_profile(message: Message, p, mode="feed"):
+async def show_profile(message: Message, p, mode="feed", extra_kb=None):
     if not p:
         await message.answer("Анкеты закончились.", reply_markup=main_menu())
         return
-    active_cards[message.from_user.id] = (mode, p["user_id"])
+    if mode in ("feed", "incoming"):
+        active_cards[message.chat.id] = (mode, p["user_id"])
     if mode == "feed":
         markup = feed_kb()
     elif mode == "incoming":
         markup = incoming_kb()
     elif mode == "mine":
         markup = edit_profile_kb()
+    elif mode == "liked":
+        markup = liked_kb(user_link(p))
     else:
-        markup = None
+        markup = extra_kb
     caption = profile_caption(p)
     photos = p["photos"].split(",") if ("photos" in p.keys() and p["photos"]) else []
     if photos:
-        if mode == "feed":
-            await message.answer_photo(photos[0], caption=caption, reply_markup=markup, has_spoiler=False)
-        elif len(photos) == 1:
-            await message.answer_photo(photos[0], caption=caption, reply_markup=markup, has_spoiler=False)
+        if mode in ("feed", "incoming", "liked") or len(photos) == 1:
+            await message.answer_photo(photos[0], caption=caption, reply_markup=markup)
         else:
             media = [InputMediaPhoto(media=ph, caption=caption if i == 0 else None) for i, ph in enumerate(photos)]
             await message.answer_media_group(media)
@@ -72,9 +74,24 @@ async def show_profile(message: Message, p, mode="feed"):
     else:
         await message.answer(caption, reply_markup=markup)
 
+# ---------- Middleware: бан ----------
+class BanMiddleware(BaseMiddleware):
+    def __init__(self, conn): self.conn = conn
+    async def __call__(self, handler, event, data):
+        uid = event.from_user.id if hasattr(event, "from_user") and event.from_user else None
+        if uid and await db.is_banned(self.conn, uid):
+            if isinstance(event, Message):
+                await event.answer("🚫 Ты заблокирован.")
+            elif isinstance(event, CallbackQuery):
+                await event.answer("🚫 Ты заблокирован.", show_alert=True)
+            return
+        return await handler(event, data)
+
 async def start_registration(message: Message, state: FSMContext, is_edit=False):
     await state.clear()
-    await state.update_data(user_id=message.from_user.id, username=message.from_user.username, photos=[], is_edit=is_edit)
+    user_photos.pop(message.from_user.id, None)
+    await state.update_data(user_id=message.from_user.id, username=message.from_user.username,
+                            photos=[], is_edit=is_edit)
     await state.set_state(Registration.gender)
     await message.answer("Привет! Давай создадим анкету. Какой у тебя пол?", reply_markup=gender_kb())
 
@@ -89,8 +106,7 @@ async def notify_new_profiles(bot: Bot, conn):
                 cur = await conn.execute("SELECT user_id, created_at FROM users WHERE is_active=1 AND is_banned=0")
                 users = await cur.fetchall()
                 for u in users:
-                    if u["created_at"] > thirty_mins_ago:
-                        continue
+                    if u["created_at"] > thirty_mins_ago: continue
                     try:
                         await bot.send_message(u["user_id"], f"🔔 За последние 30 минут появилось {new_count} новых анкет в {CITY}! Загляни в поиск.")
                     except: pass
@@ -102,7 +118,9 @@ async def main():
     bot = Bot(TOKEN)
     dp = Dispatcher(storage=MemoryStorage())
     conn = await db.connect()
-    asyncio.create_task(notify_new_profiles(bot, conn))
+    dp.message.middleware(BanMiddleware(conn))
+    dp.callback_query.middleware(BanMiddleware(conn))
+    task = asyncio.create_task(notify_new_profiles(bot, conn))
 
     @dp.message(CommandStart())
     async def start(m: Message, state: FSMContext):
@@ -114,12 +132,10 @@ async def main():
                     ref_id = int(args[1].replace("ref_", ""))
                     if ref_id != m.from_user.id:
                         if await db.set_referral(conn, m.from_user.id, ref_id):
-                            await db.add_reward(conn, ref_id, 3)
-                            await m.answer("🎉 Ты пришел по приглашению друга! Ему начислено +3 дня Премиума.")
-                            try:
-                                await bot.send_message(ref_id, "🎁 По твоей ссылке зарегистрировался друг! Тебе начислено +3 дня Премиума ⭐")
-                            except: pass
-                except: pass
+                            await state.update_data(pending_ref=ref_id)
+                            await m.answer("🎉 Ты пришел по приглашению друга! Создай анкету, и друг получит +3 дня Премиума.")
+                except (ValueError, TypeError) as e:
+                    logging.warning(f"ref parse: {e}")
             await start_registration(m, state)
         else:
             await m.answer("С возвращением!", reply_markup=main_menu())
@@ -129,8 +145,10 @@ async def main():
     async def cancel(m: Message, state: FSMContext):
         await state.clear()
         user_photos.pop(m.from_user.id, None)
+        likes_state.pop(m.from_user.id, None)
         await m.answer("Действие отменено.", reply_markup=main_menu())
 
+    # ---------- Регистрация ----------
     @dp.message(Registration.gender)
     async def reg_gender(m: Message, state: FSMContext):
         val = {"Я парень":"m", "Я девушка":"f"}.get(m.text)
@@ -145,14 +163,12 @@ async def main():
         if not val: return await m.answer("Жми кнопки.", reply_markup=target_kb())
         await state.update_data(target_gender=val)
         await state.set_state(Registration.city)
-        city_kb = ReplyKeyboardMarkup(keyboard=[[KeyboardButton(text="Чистополь")]], resize_keyboard=True)
-        await m.answer(f"В каком ты городе? Наш бот работает только в городе {CITY}.", reply_markup=city_kb)
+        await m.answer(f"В каком ты городе? Наш бот работает только в городе {CITY}.", reply_markup=city_kb())
 
     @dp.message(Registration.city)
     async def reg_city(m: Message, state: FSMContext):
         if (m.text or "").strip().lower() not in ["чистополь", "г. чистополь"]:
-            city_kb = ReplyKeyboardMarkup(keyboard=[[KeyboardButton(text="Чистополь")]], resize_keyboard=True)
-            return await m.answer(f"❌ Бот работает только в {CITY}. Нажми кнопку ниже.", reply_markup=city_kb)
+            return await m.answer(f"❌ Бот работает только в {CITY}. Нажми кнопку ниже.", reply_markup=city_kb())
         await state.update_data(city=CITY)
         await state.set_state(Registration.name)
         await m.answer("Как мне тебя называть?", reply_markup=ReplyKeyboardRemove())
@@ -166,7 +182,8 @@ async def main():
 
     @dp.message(Registration.age)
     async def reg_age(m: Message, state: FSMContext):
-        if not m.text.isdigit() or int(m.text) < MIN_AGE: return await m.answer(f"Возраст от {MIN_AGE} лет.")
+        if not m.text.isdigit() or int(m.text) < MIN_AGE or int(m.text) > MAX_AGE:
+            return await m.answer(f"Возраст от {MIN_AGE} до {MAX_AGE} лет.")
         await state.update_data(age=int(m.text))
         await state.set_state(Registration.bio)
         bio_kb = ReplyKeyboardMarkup(keyboard=[[KeyboardButton(text="Пропустить")]], resize_keyboard=True)
@@ -235,16 +252,27 @@ async def main():
 
     @dp.message(Registration.photo, F.text == "Взять из профиля Telegram")
     async def reg_photo_telegram(m: Message, state: FSMContext):
+        uid = m.from_user.id
+        if uid not in user_photos: user_photos[uid] = []
+        if len(user_photos[uid]) >= 3:
+            return await m.answer("Ты уже добавил 3 фото. Нажми «Сохранить фото».", reply_markup=photo_kb())
         try:
             photos = await bot.get_user_profile_photos(m.from_user.id, limit=1)
             if not photos.total_count:
                 return await m.answer("В твоем профиле Telegram нет фото. Отправь своё фото.", reply_markup=photo_kb())
             file_id = photos.photos[0][-1].file_id
-            await state.update_data(photos=[file_id], video_id="")
-            await state.set_state(Registration.confirm)
-            d = await state.get_data()
-            await m.answer_photo(photo=file_id, caption=f"Проверь анкету:\n👤 {d['name']}, {d['age']}\n📍 {d['city']}\n📝 {d.get('bio') or 'Без описания'}\n\nПодтверди создание.", reply_markup=confirm_kb())
-        except Exception:
+            if file_id in user_photos[uid]:
+                return await m.answer("Это фото уже добавлено.")
+            user_photos[uid].append(file_id)
+            await state.update_data(photos=user_photos[uid], video_id="")
+            if len(user_photos[uid]) < 3:
+                await m.answer(f"Фото из профиля добавлено ({len(user_photos[uid])}/3). Еще одно или нажми «Сохранить фото».", reply_markup=photo_kb())
+            else:
+                await state.set_state(Registration.confirm)
+                d = await state.get_data()
+                await m.answer_photo(photo=user_photos[uid][0], caption=f"Проверь анкету:\n👤 {d['name']}, {d['age']}\n📍 {d['city']}\n📝 {d.get('bio') or 'Без описания'}\n\nПодтверди создание.", reply_markup=confirm_kb())
+        except Exception as e:
+            logging.error(f"profile photo: {e}")
             await m.answer("Не удалось получить фото из профиля. Отправь фото вручную.", reply_markup=photo_kb())
 
     @dp.message(Registration.photo)
@@ -263,11 +291,20 @@ async def main():
         d = await state.get_data()
         if not d.get("photos") and not d.get("video_id"):
             return await m.answer("❌ Нельзя создать анкету без фото или видео! Отправь фото или видео.")
+        # реферальная награда — только после создания анкеты
+        pending_ref = d.get("pending_ref")
         await db.save_user(conn, d)
+        if pending_ref:
+            try:
+                await db.add_reward(conn, pending_ref, 3)
+                await bot.send_message(pending_ref, "🎁 По твоей ссылке зарегистрировался друг! Тебе начислено +3 дня Премиума ⭐")
+            except Exception as e:
+                logging.error(f"ref reward: {e}")
         await state.clear()
         user_photos.pop(m.from_user.id, None)
         await m.answer("Анкета готова! Ищем пару.", reply_markup=main_menu())
 
+    # ---------- Лента ----------
     @dp.message(F.text == "🔎 Смотреть анкеты")
     async def feed(m: Message):
         me = await db.get_user(conn, m.from_user.id)
@@ -279,9 +316,11 @@ async def main():
     @dp.callback_query(F.data.in_({"like", "dislike"}))
     async def handle_reaction(callback: CallbackQuery):
         uid = callback.from_user.id
-        card = active_cards.get(uid)
-        if not card or card[0] != "feed": return await callback.answer("Анкета уже неактивна.")
+        card = active_cards.pop(uid, None)
+        if not card or card[0] != "feed":
+            return await callback.answer("Анкета уже неактивна.")
         target, reaction = card[1], callback.data
+        await callback.message.delete()
         await db.add_reaction(conn, uid, target, reaction)
         if reaction == "like" and await db.mutual_like(conn, uid, target):
             await db.add_match(conn, uid, target)
@@ -295,7 +334,6 @@ async def main():
         p = await db.next_profile(conn, me)
         if p: await show_profile(callback.message, p)
         else: await callback.message.answer("Анкеты закончились.", reply_markup=main_menu())
-        await callback.message.delete()
         await callback.answer()
 
     @dp.callback_query(F.data == "undo")
@@ -303,62 +341,81 @@ async def main():
         uid = callback.from_user.id
         last_target_id = await db.get_last_reaction(conn, uid)
         if not last_target_id:
-            return await callback.answer("Нечего отменять. Ты пока никого не оценил.", show_alert=True)
+            return await callback.answer("Нечего отменять (или прошло 30 минут).", show_alert=True)
         await db.undo_reaction(conn, uid, last_target_id)
         target_user = await db.get_user(conn, last_target_id)
+        await callback.message.delete()
         if target_user and target_user["is_active"] and not target_user["is_banned"]:
-            await callback.message.delete()
             await show_profile(callback.message, target_user, mode="feed")
             await callback.answer("Действие отменено!")
         else:
-            await callback.answer("Анкета недоступна.", show_alert=True)
             me = await db.get_user(conn, uid)
             p = await db.next_profile(conn, me)
             if p: await show_profile(callback.message, p)
             else: await callback.message.answer("Анкеты закончились.", reply_markup=main_menu())
-            await callback.message.delete()
+            await callback.answer("Анкета недоступна.")
 
     @dp.callback_query(F.data == "sleep")
     async def handle_sleep(callback: CallbackQuery):
-        await callback.answer("Анкета скрыта")
-        await callback.message.delete()
-        await callback.message.answer("Ты скрыл анкету из поиска.", reply_markup=main_menu())
+        active_cards.pop(callback.from_user.id, None)
         await conn.execute("UPDATE users SET is_active=0 WHERE user_id=?", (callback.from_user.id,))
         await conn.commit()
+        await callback.message.delete()
+        await callback.message.answer("Ты скрыл анкету из поиска.", reply_markup=main_menu())
+        await callback.answer("Анкета скрыта")
 
     @dp.callback_query(F.data == "report")
     async def handle_report(callback: CallbackQuery):
-        card = active_cards.get(callback.from_user.id)
+        card = active_cards.pop(callback.from_user.id, None)
         if not card: return await callback.answer("Ошибка.")
         await db.add_report(conn, callback.from_user.id, card[1], "Жалоба из ленты")
-        await callback.answer("Жалоба отправлена модератору.")
         await callback.message.delete()
+        await callback.answer("Жалоба отправлена модератору.")
+        me = await db.get_user(conn, callback.from_user.id)
+        p = await db.next_profile(conn, me)
+        if p: await show_profile(callback.message, p)
+        else: await callback.message.answer("Анкеты закончились.", reply_markup=main_menu())
 
     @dp.callback_query(F.data == "block")
     async def handle_block(callback: CallbackQuery):
-        card = active_cards.get(callback.from_user.id)
+        card = active_cards.pop(callback.from_user.id, None)
         if not card: return await callback.answer("Ошибка.")
         await db.block_user(conn, callback.from_user.id, card[1])
-        await callback.answer("Пользователь заблокирован.")
         await callback.message.delete()
+        await callback.answer("Пользователь заблокирован.")
+        me = await db.get_user(conn, callback.from_user.id)
+        p = await db.next_profile(conn, me)
+        if p: await show_profile(callback.message, p)
+        else: await callback.message.answer("Анкеты закончились.", reply_markup=main_menu())
 
+    # ---------- Премиум ----------
     @dp.message(F.text == "⭐ Премиум")
     async def premium_menu(m: Message):
         is_prem = await db.check_premium(conn, m.from_user.id)
         status = "✅ У тебя активен Премиум!" if is_prem else "❌ У тебя нет Премиума."
-        text = f"{status}\n\nЧто дает Премиум:\n1. Видишь **ВСЕХ**, кто тебя лайкнул.\n2. Твоя анкета показывается первой.\n3. Возможность отменять лайки без ограничений.\n\nВыбери тариф:"
-        await m.answer(text, reply_markup=premium_kb())
+        text = (f"{status}\n\nЧто дает Премиум:\n"
+                "1. Видишь *ВСЕХ*, кто тебя лайкнул.\n"
+                "2. Твоя анкета показывается первой.\n"
+                "3. Возможность отменять лайки без ограничений.\n\n"
+                "Выбери тариф:")
+        await m.answer(text, reply_markup=premium_kb(), parse_mode="Markdown")
 
     @dp.callback_query(F.data.startswith("buy_premium_"))
     async def buy_premium(callback: CallbackQuery):
         days = int(callback.data.split("_")[-1])
         price = 50 if days == 7 else 150
         title = f"Премиум на {days} дней"
-        await bot.send_invoice(chat_id=callback.from_user.id, title=title, description="Доступ к скрытым функциям бота знакомств", payload=f"premium_{days}", provider_token="", currency="XTR", prices=[LabeledPrice(label=title, amount=price)], start_parameter="premium")
+        await bot.send_invoice(chat_id=callback.from_user.id, title=title,
+                               description="Доступ к скрытым функциям бота знакомств",
+                               payload=f"premium_{days}", provider_token="", currency="XTR",
+                               prices=[LabeledPrice(label=title, amount=price)],
+                               start_parameter="premium")
         await callback.answer()
 
     @dp.pre_checkout_query()
     async def pre_checkout(query: PreCheckoutQuery):
+        if not query.invoice_payload.startswith("premium_"):
+            return await bot.answer_pre_checkout_query(query.id, ok=False, error_message="Неизвестный товар")
         await bot.answer_pre_checkout_query(query.id, ok=True)
 
     @dp.message(F.successful_payment)
@@ -368,77 +425,150 @@ async def main():
         await db.set_premium(conn, m.from_user.id, days)
         await m.answer(f"🎉 Спасибо за покупку! Премиум активирован на {days} дней.")
 
+    # ---------- Кто меня лайкнул (постранично) ----------
+    async def render_incoming(message: Message, uid, offset: int):
+        total = await db.count_incoming_likes(conn, uid)
+        if total == 0:
+            likes_state.pop(uid, None)
+            await message.answer("Пока нет лайков.", reply_markup=main_menu())
+            return
+        is_prem = await db.check_premium(conn, uid)
+        if not is_prem and offset > 0:
+            await message.answer("🔒 Чтобы листать лайки, нужен Премиум.", reply_markup=premium_kb())
+            return
+        if offset >= total: offset = total - 1
+        rows = await db.incoming_likes(conn, uid, offset=offset, limit=1)
+        if not rows:
+            await message.answer("Больше лайков нет.", reply_markup=main_menu())
+            return
+        p = rows[0]
+        likes_state[uid] = {"offset": offset, "kind": "incoming"}
+        await show_profile(message, p, mode="incoming")
+        nav = likes_nav_kb(offset, total, "incoming")
+        header = f"💖 Кто меня лайкнул: {offset+1} из {total}"
+        if not is_prem and total > 1:
+            header += "\n🔒 Премиум — листать всех."
+        if nav:
+            await message.answer(header, reply_markup=nav)
+        else:
+            await message.answer(header, reply_markup=main_menu() if not is_prem else None)
+
     @dp.message(F.text == "💖 Кто меня лайкнул")
     async def likes_in(m: Message):
-        rows = await db.incoming_likes(conn, m.from_user.id)
-        if not rows: return await m.answer("Пока нет лайков.", reply_markup=main_menu())
-        is_prem = await db.check_premium(conn, m.from_user.id)
-        if is_prem:
-            await m.answer("Ты видишь всех, кто тебя лайкнул (Премиум активен):")
-            for p in rows[:10]: await show_profile(m, p, mode="incoming")
-        else:
-            await show_profile(m, rows[0], mode="incoming")
-            if len(rows) > 1:
-                await m.answer(f"🔒 А еще тебя лайкнули {len(rows)-1} человек. Купи Премиум, чтобы увидеть их всех!", reply_markup=premium_kb())
+        await render_incoming(m, m.from_user.id, 0)
 
-    @dp.message(F.text == "❤️ Мои лайки")
-    async def my_likes(m: Message):
-        rows = await db.my_likes(conn, m.from_user.id)
-        if not rows: return await m.answer("Ты пока никого не лайкнул.", reply_markup=main_menu())
-        for p in rows[:3]: await show_profile(m, p, mode="mine")
+    @dp.callback_query(F.data.startswith("incoming_page_"))
+    async def incoming_page(callback: CallbackQuery):
+        offset = int(callback.data.split("_")[-1])
+        await callback.message.delete()
+        await render_incoming(callback.message, callback.from_user.id, offset)
+        await callback.answer()
 
     @dp.callback_query(F.data == "like_back")
     async def cb_like_back(callback: CallbackQuery):
         uid = callback.from_user.id
-        card = active_cards.get(uid)
-        if not card or card[0] != "incoming": return await callback.answer("Ошибка.")
+        card = active_cards.pop(uid, None)
+        if not card or card[0] != "incoming":
+            return await callback.answer("Ошибка.")
         target = card[1]
         await db.add_reaction(conn, uid, target, "like")
         await db.add_match(conn, uid, target)
         other = await db.get_user(conn, target)
         me = await db.get_user(conn, uid)
+        await callback.message.delete()
         await callback.message.answer(f"💚 Взаимно! Написать: {user_link(other)}", reply_markup=main_menu())
         try:
             await bot.send_message(target, f"💚 Взаимно! Написать: {user_link(me)}")
         except: pass
-        await callback.message.delete()
-        active_cards.pop(uid, None)
         await callback.answer()
+        st = likes_state.get(uid)
+        if st: await render_incoming(callback.message, uid, st["offset"])
 
     @dp.callback_query(F.data == "skip")
     async def cb_skip(callback: CallbackQuery):
         uid = callback.from_user.id
-        await callback.message.delete()
         active_cards.pop(uid, None)
-        rows = await db.incoming_likes(conn, uid)
-        if rows: await show_profile(callback.message, rows[0], mode="incoming")
-        else: await callback.message.answer("Лайки закончились.", reply_markup=main_menu())
+        await callback.message.delete()
+        st = likes_state.get(uid)
+        offset = st["offset"] if st else 0
+        # пропуск не удаляет реакцию — просто листаем дальше
+        await render_incoming(callback.message, uid, offset + 1)
         await callback.answer()
 
+    # ---------- Мои лайки (постранично, без редактирования) ----------
+    async def render_my_likes(message: Message, uid, offset: int):
+        total = await db.count_my_likes(conn, uid)
+        if total == 0:
+            await message.answer("Ты пока никого не лайкнул.", reply_markup=main_menu())
+            return
+        if offset >= total: offset = total - 1
+        rows = await db.my_likes(conn, uid, offset=offset, limit=1)
+        if not rows:
+            await message.answer("Больше нет.", reply_markup=main_menu())
+            return
+        likes_state[uid] = {"offset": offset, "kind": "mine"}
+        await show_profile(message, rows[0], mode="liked")
+        nav = likes_nav_kb(offset, total, "mylikes")
+        header = f"❤️ Мои лайки: {offset+1} из {total}"
+        if nav:
+            await message.answer(header, reply_markup=nav)
+        else:
+            await message.answer(header, reply_markup=main_menu())
+
+    @dp.message(F.text == "❤️ Мои лайки")
+    async def my_likes(m: Message):
+        await render_my_likes(m, m.from_user.id, 0)
+
+    @dp.callback_query(F.data.startswith("mylikes_page_"))
+    async def mylikes_page(callback: CallbackQuery):
+        offset = int(callback.data.split("_")[-1])
+        await callback.message.delete()
+        await render_my_likes(callback.message, callback.from_user.id, offset)
+        await callback.answer()
+
+    # ---------- Фильтр возраста ----------
     @dp.message(F.text == "🎂 Фильтр возраста")
     async def age_filter(m: Message):
-        await m.answer("Выбери диапазон возрастов для поиска:", reply_markup=age_filter_kb())
+        me = await db.get_user(conn, m.from_user.id)
+        cur = f"Сейчас: от {me['target_age_min']} до {me['target_age_max']} лет." if me else ""
+        await m.answer(f"{cur}\n\nВыбери диапазон возрастов для поиска:", reply_markup=age_filter_kb())
+
+    @dp.callback_query(F.data == "age_close")
+    async def age_close(callback: CallbackQuery):
+        await callback.message.delete()
+        await callback.answer()
 
     @dp.callback_query(F.data.startswith("age_"))
     async def set_age_filter(callback: CallbackQuery):
         val = callback.data
         if val == "age_all":
-            mn, mx = 14, 99
+            mn, mx = MIN_AGE, MAX_AGE
         else:
-            parts = val.replace("age_", "").split("_")
-            mn, mx = int(parts[0]), int(parts[1])
-        await conn.execute("UPDATE users SET target_age_min=?, target_age_max=? WHERE user_id=?", (mn, mx, callback.from_user.id))
+            try:
+                parts = val.replace("age_", "").split("_")
+                mn, mx = int(parts[0]), int(parts[1])
+            except (ValueError, IndexError):
+                return await callback.answer("Ошибка фильтра.", show_alert=True)
+        if not (MIN_AGE <= mn <= mx <= MAX_AGE):
+            return await callback.answer("Некорректный диапазон.", show_alert=True)
+        await conn.execute("UPDATE users SET target_age_min=?, target_age_max=? WHERE user_id=?",
+                           (mn, mx, callback.from_user.id))
         await conn.commit()
         await callback.message.delete()
         await callback.message.answer(f"✅ Фильтр возраста установлен: от {mn} до {mx} лет.", reply_markup=main_menu())
         await callback.answer()
 
+    # ---------- Рефералка ----------
     @dp.message(F.text == "🔗 Пригласить друга")
     async def invite_friend(m: Message):
+        me = await db.get_user(conn, m.from_user.id)
+        if not me:
+            return await m.answer("Сначала создай анкету /start")
         bot_info = await bot.get_me()
         ref_link = f"https://t.me/{bot_info.username}?start=ref_{m.from_user.id}"
         await m.answer(f"Пригласи друга по этой ссылке:\n{ref_link}\n\nКогда он зарегистрируется, ты получишь +3 дня Премиума!")
 
+    # ---------- Моя анкета ----------
     @dp.message(F.text == "👤 Моя анкета")
     async def my_profile(m: Message):
         u = await db.get_user(conn, m.from_user.id)
@@ -468,12 +598,13 @@ async def main():
     @dp.callback_query(F.data == "edit_age")
     async def cb_edit_age(callback: CallbackQuery, state: FSMContext):
         await state.set_state(EditProfile.age)
-        await callback.message.answer(f"Введи новый возраст (от {MIN_AGE}):")
+        await callback.message.answer(f"Введи новый возраст (от {MIN_AGE} до {MAX_AGE}):")
         await callback.answer()
 
     @dp.message(EditProfile.age)
     async def save_new_age(m: Message, state: FSMContext):
-        if not m.text.isdigit() or int(m.text) < MIN_AGE: return await m.answer(f"Возраст от {MIN_AGE} лет.")
+        if not m.text.isdigit() or not (MIN_AGE <= int(m.text) <= MAX_AGE):
+            return await m.answer(f"Возраст от {MIN_AGE} до {MAX_AGE} лет.")
         await conn.execute("UPDATE users SET age=? WHERE user_id=?", (int(m.text), m.from_user.id))
         await conn.commit()
         await state.clear()
@@ -509,10 +640,7 @@ async def main():
         new_photo = m.photo[-1].file_id
         if new_photo in user_photos[uid]: return await m.answer("Ты уже добавил это фото.")
         user_photos[uid].append(new_photo)
-        if len(user_photos[uid]) < 3:
-            await m.answer(f"Фото добавлено ({len(user_photos[uid])}/3). Еще одно или нажми «Сохранить фото».", reply_markup=photo_edit_kb())
-        else:
-            await m.answer(f"Фото добавлено ({len(user_photos[uid])}/3). Нажми «Сохранить фото».", reply_markup=photo_edit_kb())
+        await m.answer(f"Фото добавлено ({len(user_photos[uid])}/3). Еще одно или нажми «Сохранить фото».", reply_markup=photo_edit_kb())
 
     @dp.message(EditProfile.photo, F.text == "Взять из профиля Telegram")
     async def edit_photo_from_telegram(m: Message, state: FSMContext):
@@ -525,11 +653,9 @@ async def main():
             file_id = photos.photos[0][-1].file_id
             if file_id in user_photos[uid]: return await m.answer("Это фото уже добавлено.")
             user_photos[uid].append(file_id)
-            if len(user_photos[uid]) < 3:
-                await m.answer(f"Фото из профиля добавлено ({len(user_photos[uid])}/3). Еще одно или нажми «Сохранить фото».", reply_markup=photo_edit_kb())
-            else:
-                await m.answer(f"Фото из профиля добавлено ({len(user_photos[uid])}/3). Нажми «Сохранить фото».", reply_markup=photo_edit_kb())
-        except Exception:
+            await m.answer(f"Фото из профиля добавлено ({len(user_photos[uid])}/3). Еще одно или нажми «Сохранить фото».", reply_markup=photo_edit_kb())
+        except Exception as e:
+            logging.error(f"edit profile photo: {e}")
             await m.answer("Не удалось получить фото из профиля.")
 
     @dp.message(EditProfile.photo, F.text == "Сохранить фото")
@@ -559,6 +685,7 @@ async def main():
     @dp.message(F.text == "🌙 Сон / Поиск")
     async def toggle(m: Message):
         u = await db.get_user(conn, m.from_user.id)
+        if not u: return await m.answer("Сначала создай анкету /start", reply_markup=main_menu())
         new = 0 if u["is_active"] else 1
         await conn.execute("UPDATE users SET is_active=? WHERE user_id=?", (new, m.from_user.id))
         await conn.commit()
@@ -568,9 +695,48 @@ async def main():
     async def help_msg(m: Message):
         await m.answer("Помощь: лайкай анкеты. Контакты только при взаимности. В меню есть фильтр возраста, премиум и приглашение друзей.", reply_markup=main_menu())
 
+    # ---------- Админка ----------
+    @dp.message(Command("admin"), F.from_user.id.in_(ADMIN_IDS))
+    async def admin_panel(m: Message):
+        cur = await conn.execute("SELECT COUNT(*) n FROM users")
+        u = (await cur.fetchone())["n"]
+        cur = await conn.execute("SELECT COUNT(*) n FROM reports")
+        r = (await cur.fetchone())["n"]
+        await m.answer(f"👑 Админ\nЮзеров: {u}\nЖалоб: {r}\n\n/verify <id> — верифицировать\n/ban <id> — забанить\n/unban <id> — разбанить")
+
+    @dp.message(Command("verify"), F.from_user.id.in_(ADMIN_IDS))
+    async def admin_verify(m: Message):
+        try:
+            uid = int(m.text.split()[1])
+        except (IndexError, ValueError):
+            return await m.answer("Использование: /verify <id>")
+        await db.verify_user(conn, uid)
+        await m.answer(f"✅ Юзер {uid} верифицирован.")
+
+    @dp.message(Command("ban"), F.from_user.id.in_(ADMIN_IDS))
+    async def admin_ban(m: Message):
+        try:
+            uid = int(m.text.split()[1])
+        except (IndexError, ValueError):
+            return await m.answer("Использование: /ban <id>")
+        await conn.execute("UPDATE users SET is_banned=1, is_active=0 WHERE user_id=?", (uid,))
+        await conn.commit()
+        await m.answer(f"🚫 Юзер {uid} забанен.")
+
+    @dp.message(Command("unban"), F.from_user.id.in_(ADMIN_IDS))
+    async def admin_unban(m: Message):
+        try:
+            uid = int(m.text.split()[1])
+        except (IndexError, ValueError):
+            return await m.answer("Использование: /unban <id>")
+        await conn.execute("UPDATE users SET is_banned=0 WHERE user_id=?", (uid,))
+        await conn.commit()
+        await m.answer(f"✅ Юзер {uid} разбанен.")
+
     try:
         await dp.start_polling(bot)
     finally:
+        task.cancel()
         await conn.close()
 
 if __name__ == "__main__":
