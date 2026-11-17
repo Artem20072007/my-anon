@@ -106,7 +106,6 @@ async def connect():
     await db.execute("PRAGMA journal_mode=WAL")
     await db.execute("PRAGMA busy_timeout=5000")
     await db.executescript(SCHEMA)
-    # Безопасные миграции
     for stmt in [
         "ALTER TABLE users ADD COLUMN premium_until TEXT DEFAULT NULL",
         "ALTER TABLE users ADD COLUMN is_verified INTEGER DEFAULT 0",
@@ -117,11 +116,14 @@ async def connect():
             await db.execute(stmt)
         except aiosqlite.OperationalError:
             pass
-    # 🔧 Фикс бага: старые строки после ALTER TABLE могут иметь NULL в target_age_*
+    # Миграции NULL-полей
     await db.execute("UPDATE users SET target_age_min=14 WHERE target_age_min IS NULL")
     await db.execute("UPDATE users SET target_age_max=99 WHERE target_age_max IS NULL")
     await db.execute("UPDATE users SET is_active=1 WHERE is_active IS NULL")
     await db.execute("UPDATE users SET is_banned=0 WHERE is_banned IS NULL")
+    await db.execute("UPDATE users SET photos='' WHERE photos IS NULL")
+    await db.execute("UPDATE users SET video_id='' WHERE video_id IS NULL")
+    await db.execute("UPDATE users SET bio='' WHERE bio IS NULL")
     await db.commit()
     return db
 
@@ -209,6 +211,9 @@ async def add_reaction(db, from_id, to_id, reaction):
     try:
         await db.execute("INSERT INTO reactions(from_user_id,to_user_id,reaction,created_at) VALUES(?,?,?,?)",
                          (from_id, to_id, reaction, now()))
+        # При лайке убираем возможный skip, чтобы не было мусора
+        if reaction == "like":
+            await db.execute("DELETE FROM skipped_likes WHERE user_id=? AND target_id=?", (from_id, to_id))
         await db.commit()
         return True
     except aiosqlite.IntegrityError:
@@ -230,7 +235,6 @@ async def like_back(db, uid, target):
         await db.execute(
             "INSERT OR IGNORE INTO reactions(from_user_id,to_user_id,reaction,created_at) VALUES(?,?,'like',?)",
             (uid, target, now()))
-        # 🔧 Фикс: убираем из skipped, если он там был
         await db.execute("DELETE FROM skipped_likes WHERE user_id=? AND target_id=?", (uid, target))
         cur = await db.execute(
             "SELECT 1 FROM reactions WHERE from_user_id=? AND to_user_id=? AND reaction='like'",
@@ -333,7 +337,7 @@ async def add_reward(db, uid, days):
     cur = await db.execute("SELECT premium_until FROM users WHERE user_id=?", (uid,))
     row = await cur.fetchone()
     if not row:
-        return
+        return False
     base = datetime.now(timezone.utc)
     pu = _parse_dt(row["premium_until"])
     if pu and pu > base:
@@ -341,6 +345,7 @@ async def add_reward(db, uid, days):
     new_until = (base + timedelta(days=days)).isoformat()
     await db.execute("UPDATE users SET premium_until=? WHERE user_id=?", (new_until, uid))
     await db.commit()
+    return True
 
 async def check_premium(db, uid):
     cur = await db.execute("SELECT premium_until FROM users WHERE user_id=?", (uid,))
@@ -351,15 +356,13 @@ async def check_premium(db, uid):
     return bool(pu and pu > datetime.now(timezone.utc))
 
 async def set_premium(db, uid, days):
-    await add_reward(db, uid, days)
+    return await add_reward(db, uid, days)
 
 async def has_like(db, from_id, to_id):
     cur = await db.execute(
         "SELECT 1 FROM reactions WHERE from_user_id=? AND to_user_id=? AND reaction='like'",
         (from_id, to_id))
     return await cur.fetchone() is not None
-
-# --- СТАТИСТИКА И РУЛЕТКА ---
 
 async def register_view(db, viewer_id, target_id):
     if viewer_id == target_id:
