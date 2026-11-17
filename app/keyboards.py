@@ -9,11 +9,11 @@ def target_kb():
 def city_kb():
     return ReplyKeyboardMarkup(keyboard=[[KeyboardButton(text="Чистополь")]], resize_keyboard=True)
 
-def phone_kb():
-    return ReplyKeyboardMarkup(keyboard=[[KeyboardButton(text="📱 Отправить мой номер телефона", request_contact=True)]], resize_keyboard=True)
-
 def photo_kb():
-    return ReplyKeyboardMarkup(keyboard=[[KeyboardButton(text="Сохранить фото")]], resize_keyboard=True)
+    return ReplyKeyboardMarkup(keyboard=[
+        [KeyboardButton(text="Взять из профиля Telegram")],
+        [KeyboardButton(text="Сохранить фото")]
+    ], resize_keyboard=True)
 
 def photo_edit_kb():
     return ReplyKeyboardMarkup(keyboard=[
@@ -26,7 +26,6 @@ def confirm_kb():
     return ReplyKeyboardMarkup(keyboard=[[KeyboardButton(text="✅ Да, все верно")], [KeyboardButton(text="✏️ Изменить анкету")]], resize_keyboard=True)
 
 def main_menu():
-    # ИСПРАВЛЕНИЕ: добавлены фильтр возраста и рефералка
     return ReplyKeyboardMarkup(keyboard=[
         [KeyboardButton(text="🔎 Смотреть анкеты"), KeyboardButton(text="👤 Моя анкета")],
         [KeyboardButton(text="💖 Кто меня лайкнул"), KeyboardButton(text="❤️ Мои лайки")],
@@ -36,7 +35,6 @@ def main_menu():
     ], resize_keyboard=True)
 
 def feed_kb():
-    # ИСПРАВЛЕНИЕ: добавлена кнопка «Отменить»
     return InlineKeyboardMarkup(inline_keyboard=[
         [InlineKeyboardButton(text="❤️", callback_data="like"), InlineKeyboardButton(text="👎", callback_data="dislike")],
         [InlineKeyboardButton(text="💤 Скрыть", callback_data="sleep"), InlineKeyboardButton(text="↩️ Отменить", callback_data="undo")]
@@ -46,6 +44,11 @@ def incoming_kb():
     return InlineKeyboardMarkup(inline_keyboard=[
         [InlineKeyboardButton(text="💚 Ответить взаимностью", callback_data="like_back")],
         [InlineKeyboardButton(text="➡️ Пропустить", callback_data="skip")]
+    ])
+
+def liked_kb(url):
+    return InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text="💬 Написать", url=url)]
     ])
 
 def edit_profile_kb():
@@ -61,14 +64,13 @@ def edit_menu_kb():
         [InlineKeyboardButton(text="🎂 Изменить возраст", callback_data="edit_age")],
         [InlineKeyboardButton(text="❌ Отмена", callback_data="cancel_edit")]
     ])
-    
-    # Добавь это в конец файла app/keyboards.py
 
 def age_filter_kb():
     return InlineKeyboardMarkup(inline_keyboard=[
         [InlineKeyboardButton(text="14-17", callback_data="age_14_17"), InlineKeyboardButton(text="18-24", callback_data="age_18_24")],
         [InlineKeyboardButton(text="25-35", callback_data="age_25_35"), InlineKeyboardButton(text="36-99", callback_data="age_36_99")],
-        [InlineKeyboardButton(text="Все возраста", callback_data="age_all")]
+        [InlineKeyboardButton(text="Все возраста", callback_data="age_all")],
+        [InlineKeyboardButton(text="❌ Закрыть", callback_data="age_close")]
     ])
 
 def premium_kb():
@@ -76,3 +78,12 @@ def premium_kb():
         [InlineKeyboardButton(text="7 дней - 50 ⭐️", callback_data="buy_premium_7")],
         [InlineKeyboardButton(text="30 дней - 150 ⭐️", callback_data="buy_premium_30")]
     ])
+
+def likes_nav_kb(offset, total, prefix):
+    """Навигация по страницам для 'кто лайкнул' / 'мои лайки'."""
+    row = []
+    if offset > 0:
+        row.append(InlineKeyboardButton(text="⬅️ Назад", callback_data=f"{prefix}_page_{offset-1}"))
+    if offset + 1 < total:
+        row.append(InlineKeyboardButton(text="Вперёд ➡️", callback_data=f"{prefix}_page_{offset+1}"))
+    return InlineKeyboardMarkup(inline_keyboard=[row]) if row else None
