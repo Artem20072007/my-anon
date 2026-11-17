@@ -61,10 +61,27 @@ CREATE TABLE IF NOT EXISTS blocks (
  created_at TEXT NOT NULL,
  PRIMARY KEY(blocker_id, blocked_id)
 );
+CREATE TABLE IF NOT EXISTS views (
+    viewer_id INTEGER NOT NULL,
+    target_id INTEGER NOT NULL,
+    created_at TEXT NOT NULL,
+    PRIMARY KEY(viewer_id, target_id)
+);
+CREATE TABLE IF NOT EXISTS roulette_rooms (
+    room_id INTEGER PRIMARY KEY AUTOINCREMENT,
+    user1_id INTEGER NOT NULL,
+    user2_id INTEGER NOT NULL,
+    created_at TEXT NOT NULL
+);
+CREATE TABLE IF NOT EXISTS roulette_queue (
+    user_id INTEGER PRIMARY KEY,
+    joined_at TEXT NOT NULL
+);
 CREATE INDEX IF NOT EXISTS idx_users_feed ON users(is_active, is_banned, city, age, gender);
 CREATE INDEX IF NOT EXISTS idx_reactions_to ON reactions(to_user_id, reaction);
 CREATE INDEX IF NOT EXISTS idx_reactions_from ON reactions(from_user_id);
 CREATE INDEX IF NOT EXISTS idx_reports_target ON reports(target_id);
+CREATE INDEX IF NOT EXISTS idx_views_target ON views(target_id);
 '''
 
 def now():
@@ -106,14 +123,9 @@ async def is_banned(db, uid):
     return bool(row and row["is_banned"])
 
 async def save_user(db, data):
-    """Создаёт или обновляет анкету.
-    FIX: при UPDATE не сбрасываем is_active и возрастной фильтр,
-    если они не переданы явно в data.
-    """
     photos_str = ",".join(data.get("photos", []))
     old = await get_user(db, data["user_id"])
 
-    # если правим существующего — берём is_active и фильтр из БД, если не переданы
     if old:
         is_active = data.get("is_active", old["is_active"])
         target_age_min = data.get("target_age_min", old["target_age_min"])
@@ -196,9 +208,6 @@ async def add_match(db, a, b):
     await db.commit()
 
 async def like_back(db, uid, target):
-    """FIX: атомарно добавляет лайк и, если взаимно, матч.
-    Возвращает True, если матч создан.
-    """
     try:
         await db.execute(
             "INSERT OR IGNORE INTO reactions(from_user_id,to_user_id,reaction,created_at) VALUES(?,?,'like',?)",
@@ -251,22 +260,6 @@ async def skip_incoming_like(db, uid, target_id):
     except aiosqlite.Error:
         pass
 
-async def my_likes(db, uid, offset=0, limit=1):
-    cur = await db.execute('''SELECT u.* FROM users u
-      JOIN reactions r ON r.to_user_id = u.user_id
-      WHERE r.from_user_id = ? AND r.reaction = 'like'
-        AND u.is_banned = 0
-      ORDER BY r.created_at DESC
-      LIMIT ? OFFSET ?''', (uid, limit, offset))
-    return await cur.fetchall()
-
-async def count_my_likes(db, uid):
-    cur = await db.execute('''SELECT COUNT(*) AS n FROM users u
-      JOIN reactions r ON r.to_user_id = u.user_id
-      WHERE r.from_user_id = ? AND r.reaction = 'like' AND u.is_banned = 0''', (uid,))
-    row = await cur.fetchone()
-    return row["n"] if row else 0
-
 async def add_report(db, reporter, target, reason):
     try:
         await db.execute("INSERT INTO reports(reporter_id,target_id,reason,created_at) VALUES(?,?,?,?)",
@@ -313,16 +306,6 @@ async def verify_user(db, uid):
     await db.execute("UPDATE users SET is_verified=1 WHERE user_id=?", (uid,))
     await db.commit()
 
-async def set_referral(db, uid, ref_id):
-    if uid == ref_id: return False
-    cur = await db.execute("SELECT referral_id FROM users WHERE user_id=?", (uid,))
-    row = await cur.fetchone()
-    if row and not row["referral_id"]:
-        await db.execute("UPDATE users SET referral_id=? WHERE user_id=?", (ref_id, uid))
-        await db.commit()
-        return True
-    return False
-
 async def add_reward(db, uid, days):
     cur = await db.execute("SELECT premium_until FROM users WHERE user_id=?", (uid,))
     row = await cur.fetchone()
@@ -351,3 +334,54 @@ async def has_like(db, from_id, to_id):
         "SELECT 1 FROM reactions WHERE from_user_id=? AND to_user_id=? AND reaction='like'",
         (from_id, to_id))
     return await cur.fetchone() is not None
+
+# --- СТАТИСТИКА И РУЛЕТКА ---
+
+async def register_view(db, viewer_id, target_id):
+    try:
+        await db.execute("INSERT OR IGNORE INTO views (viewer_id, target_id, created_at) VALUES (?, ?, ?)",
+                         (viewer_id, target_id, now()))
+        await db.commit()
+    except aiosqlite.Error:
+        pass
+
+async def get_profile_stats(db, uid):
+    cur = await db.execute("SELECT COUNT(*) n FROM reactions WHERE from_user_id=? AND reaction='like'", (uid,))
+    likes = (await cur.fetchone())["n"]
+    cur = await db.execute("SELECT COUNT(*) n FROM views WHERE target_id=?", (uid,))
+    views = (await cur.fetchone())["n"]
+    return likes, views
+
+async def roulette_join_queue(db, uid):
+    await db.execute("DELETE FROM roulette_queue WHERE user_id=?", (uid,))
+    cur = await db.execute("SELECT user_id FROM roulette_queue WHERE user_id != ? ORDER BY joined_at ASC LIMIT 1", (uid,))
+    partner = await cur.fetchone()
+    if partner:
+        partner_id = partner["user_id"]
+        await db.execute("DELETE FROM roulette_queue WHERE user_id=?", (partner_id,))
+        await db.execute("INSERT INTO roulette_rooms (user1_id, user2_id, created_at) VALUES (?, ?, ?)", (uid, partner_id, now()))
+        await db.commit()
+        return partner_id
+    else:
+        await db.execute("INSERT INTO roulette_queue (user_id, joined_at) VALUES (?, ?)", (uid, now()))
+        await db.commit()
+        return None
+
+async def roulette_leave(db, uid):
+    await db.execute("DELETE FROM roulette_queue WHERE user_id=?", (uid,))
+    cur = await db.execute("SELECT room_id, user1_id, user2_id FROM roulette_rooms WHERE user1_id=? OR user2_id=?", (uid, uid))
+    room = await cur.fetchone()
+    if room:
+        partner_id = room["user2_id"] if room["user1_id"] == uid else room["user1_id"]
+        await db.execute("DELETE FROM roulette_rooms WHERE room_id=?", (room["room_id"],))
+        await db.commit()
+        return partner_id
+    await db.commit()
+    return None
+
+async def roulette_get_partner(db, uid):
+    cur = await db.execute("SELECT user1_id, user2_id FROM roulette_rooms WHERE user1_id=? OR user2_id=?", (uid, uid))
+    room = await cur.fetchone()
+    if room:
+        return room["user2_id"] if room["user1_id"] == uid else room["user1_id"]
+    return None
