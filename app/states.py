@@ -15,3 +15,6 @@ class EditProfile(StatesGroup):
     age = State()
     bio = State()
     photo = State()
+
+class AdminPanel(StatesGroup):
+    give_premium = State()
