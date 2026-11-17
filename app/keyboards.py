@@ -4,7 +4,10 @@ def gender_kb():
     return ReplyKeyboardMarkup(keyboard=[[KeyboardButton(text="Я девушка"), KeyboardButton(text="Я парень")]], resize_keyboard=True)
 
 def target_kb():
-    return ReplyKeyboardMarkup(keyboard=[[KeyboardButton(text="Девушки"), KeyboardButton(text="Парни")], [KeyboardButton(text="Все равно")]], resize_keyboard=True)
+    return ReplyKeyboardMarkup(keyboard=[
+        [KeyboardButton(text="С девушками"), KeyboardButton(text="С парнями")], 
+        [KeyboardButton(text="Без разницы")]
+    ], resize_keyboard=True)
 
 def city_kb():
     return ReplyKeyboardMarkup(keyboard=[[KeyboardButton(text="Чистополь")]], resize_keyboard=True)
@@ -28,8 +31,7 @@ def confirm_kb():
 def main_menu():
     return ReplyKeyboardMarkup(keyboard=[
         [KeyboardButton(text="🔎 Смотреть анкеты"), KeyboardButton(text="👤 Моя анкета")],
-        # Кнопка "Мои лайки" удалена, "Кто меня лайкнул" теперь одна в ряду
-        [KeyboardButton(text="💖 Кто меня лайкнул")],
+        [KeyboardButton(text="💖 Кто меня лайкнул"), KeyboardButton(text="🎲 Чат-рулетка")],
         [KeyboardButton(text="🎂 Фильтр возраста"), KeyboardButton(text="🔗 Пригласить друга")],
         [KeyboardButton(text="🌙 Сон / Поиск"), KeyboardButton(text="⭐ Премиум")],
         [KeyboardButton(text="ℹ️ Помощь")]
@@ -89,6 +91,17 @@ def back_to_menu_kb():
     return InlineKeyboardMarkup(inline_keyboard=[
         [InlineKeyboardButton(text="🏠 В меню", callback_data="go_menu")]
     ])
+
+def roulette_found_kb():
+    return InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text="💚 Начать общение", callback_data="roulette_start")],
+        [InlineKeyboardButton(text="➡️ Пропустить", callback_data="roulette_skip")]
+    ])
+
+def roulette_reply_kb():
+    return ReplyKeyboardMarkup(keyboard=[
+        [KeyboardButton(text="🔄 Следующий"), KeyboardButton(text="🚪 Выйти")]
+    ], resize_keyboard=True)
 
 # ========== АДМИН-МЕНЮ ==========
 
