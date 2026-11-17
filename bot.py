@@ -24,20 +24,6 @@ CITY = "Чистополь"
 active_cards = {}
 user_photos = {} 
 
-# --- ВСТРОЕННЫЕ КЛАВИАТУРЫ ДЛЯ БЕЗОПАСНОСТИ ОТ КЭША ---
-def premium_kb():
-    return InlineKeyboardMarkup(inline_keyboard=[
-        [InlineKeyboardButton(text="7 дней - 50 ⭐", callback_data="buy_premium_7")],
-        [InlineKeyboardButton(text="30 дней - 150 ⭐", callback_data="buy_premium_30")]
-    ])
-
-def age_filter_kb():
-    return InlineKeyboardMarkup(inline_keyboard=[
-        [InlineKeyboardButton(text="14-17", callback_data="age_14_17"), InlineKeyboardButton(text="18-24", callback_data="age_18_24")],
-        [InlineKeyboardButton(text="25-35", callback_data="age_25_35"), InlineKeyboardButton(text="36-99", callback_data="age_36_99")],
-        [InlineKeyboardButton(text="Все возраста", callback_data="age_all")]
-    ])
-
 def user_link(user):
     if user.get("username"):
         return f"https://t.me/{user['username']}"
@@ -122,7 +108,6 @@ async def main():
     async def start(m: Message, state: FSMContext):
         args = m.text.split()
         user = await db.get_user(conn, m.from_user.id)
-        
         if not user:
             if len(args) > 1 and args[1].startswith("ref_"):
                 try:
@@ -146,8 +131,6 @@ async def main():
         user_photos.pop(m.from_user.id, None)
         await m.answer("Действие отменено.", reply_markup=main_menu())
 
-    # --- РЕГИСТРАЦИЯ И ОСТАЛЬНАЯ ЛОГИКА ОСТАЕТСЯ ПРЕЖНЕЙ ---
-    # (оставлено для краткости, код работает)
     @dp.message(Registration.gender)
     async def reg_gender(m: Message, state: FSMContext):
         val = {"Я парень":"m", "Я девушка":"f"}.get(m.text)
@@ -201,7 +184,6 @@ async def main():
         else:
             await m.answer("Пришли своё фото или запиши видео (до 15 сек).\nАнкеты, где видно лицо, собирают больше лайков ❤️", reply_markup=photo_kb())
 
-    # --- ОБРАБОТКА ФОТО ---
     @dp.message(Registration.photo, F.photo)
     async def reg_photo(m: Message, state: FSMContext):
         uid = m.from_user.id
@@ -237,6 +219,40 @@ async def main():
         d = await state.get_data()
         await m.answer_photo(photo=user_photos[uid][0], caption=f"Проверь анкету:\n👤 {d['name']}, {d['age']}\n📍 {d['city']}\n📝 {d.get('bio') or 'Без описания'}\n\nПодтверди создание.", reply_markup=confirm_kb())
 
+    @dp.message(Registration.photo, F.text == "Оставить текущее")
+    async def reg_photo_keep(m: Message, state: FSMContext):
+        d = await state.get_data()
+        if not d.get("is_edit"):
+            return await m.answer("Это кнопка для редактирования.", reply_markup=photo_kb())
+        old_user = await db.get_user(conn, m.from_user.id)
+        if old_user and old_user["photos"]:
+            photos = old_user["photos"].split(",")
+            await state.update_data(photos=photos, video_id="")
+            await state.set_state(Registration.confirm)
+            await m.answer_photo(photo=photos[0], caption=f"Проверь анкету:\n👤 {d['name']}, {d['age']}\n📍 {d['city']}\n📝 {d.get('bio') or 'Без описания'}\n\nПодтверди создание.", reply_markup=confirm_kb())
+        else:
+            await m.answer("У тебя нет старого фото. Отправь новое.", reply_markup=photo_kb())
+
+    @dp.message(Registration.photo, F.text == "Взять из профиля Telegram")
+    async def reg_photo_telegram(m: Message, state: FSMContext):
+        try:
+            photos = await bot.get_user_profile_photos(m.from_user.id, limit=1)
+            if not photos.total_count:
+                return await m.answer("В твоем профиле Telegram нет фото. Отправь своё фото.", reply_markup=photo_kb())
+            file_id = photos.photos[0][-1].file_id
+            await state.update_data(photos=[file_id], video_id="")
+            await state.set_state(Registration.confirm)
+            d = await state.get_data()
+            await m.answer_photo(photo=file_id, caption=f"Проверь анкету:\n👤 {d['name']}, {d['age']}\n📍 {d['city']}\n📝 {d.get('bio') or 'Без описания'}\n\nПодтверди создание.", reply_markup=confirm_kb())
+        except Exception:
+            await m.answer("Не удалось получить фото из профиля. Отправь фото вручную.", reply_markup=photo_kb())
+
+    @dp.message(Registration.photo)
+    async def reg_media_bad(m: Message, state: FSMContext):
+        d = await state.get_data()
+        kb = photo_edit_kb() if d.get("is_edit") else photo_kb()
+        await m.answer("Пожалуйста, отправь фото, видео (до 15 сек) или выбери кнопку ниже.", reply_markup=kb)
+
     @dp.message(Registration.confirm)
     async def reg_confirm(m: Message, state: FSMContext):
         if m.text == "✏️ Изменить анкету":
@@ -252,7 +268,6 @@ async def main():
         user_photos.pop(m.from_user.id, None)
         await m.answer("Анкета готова! Ищем пару.", reply_markup=main_menu())
 
-    # --- ПОИСК И ЛАЙКИ ---
     @dp.message(F.text == "🔎 Смотреть анкеты")
     async def feed(m: Message):
         me = await db.get_user(conn, m.from_user.id)
@@ -283,13 +298,275 @@ async def main():
         await callback.message.delete()
         await callback.answer()
 
-    # --- ПРЕМИУМ ---
+    @dp.callback_query(F.data == "undo")
+    async def handle_undo(callback: CallbackQuery):
+        uid = callback.from_user.id
+        last_target_id = await db.get_last_reaction(conn, uid)
+        if not last_target_id:
+            return await callback.answer("Нечего отменять. Ты пока никого не оценил.", show_alert=True)
+        await db.undo_reaction(conn, uid, last_target_id)
+        target_user = await db.get_user(conn, last_target_id)
+        if target_user and target_user["is_active"] and not target_user["is_banned"]:
+            await callback.message.delete()
+            await show_profile(callback.message, target_user, mode="feed")
+            await callback.answer("Действие отменено!")
+        else:
+            await callback.answer("Анкета недоступна.", show_alert=True)
+            me = await db.get_user(conn, uid)
+            p = await db.next_profile(conn, me)
+            if p: await show_profile(callback.message, p)
+            else: await callback.message.answer("Анкеты закончились.", reply_markup=main_menu())
+            await callback.message.delete()
+
+    @dp.callback_query(F.data == "sleep")
+    async def handle_sleep(callback: CallbackQuery):
+        await callback.answer("Анкета скрыта")
+        await callback.message.delete()
+        await callback.message.answer("Ты скрыл анкету из поиска.", reply_markup=main_menu())
+        await conn.execute("UPDATE users SET is_active=0 WHERE user_id=?", (callback.from_user.id,))
+        await conn.commit()
+
+    @dp.callback_query(F.data == "report")
+    async def handle_report(callback: CallbackQuery):
+        card = active_cards.get(callback.from_user.id)
+        if not card: return await callback.answer("Ошибка.")
+        await db.add_report(conn, callback.from_user.id, card[1], "Жалоба из ленты")
+        await callback.answer("Жалоба отправлена модератору.")
+        await callback.message.delete()
+
+    @dp.callback_query(F.data == "block")
+    async def handle_block(callback: CallbackQuery):
+        card = active_cards.get(callback.from_user.id)
+        if not card: return await callback.answer("Ошибка.")
+        await db.block_user(conn, callback.from_user.id, card[1])
+        await callback.answer("Пользователь заблокирован.")
+        await callback.message.delete()
+
     @dp.message(F.text == "⭐ Премиум")
     async def premium_menu(m: Message):
         is_prem = await db.check_premium(conn, m.from_user.id)
         status = "✅ У тебя активен Премиум!" if is_prem else "❌ У тебя нет Премиума."
         text = f"{status}\n\nЧто дает Премиум:\n1. Видишь **ВСЕХ**, кто тебя лайкнул.\n2. Твоя анкета показывается первой.\n3. Возможность отменять лайки без ограничений.\n\nВыбери тариф:"
         await m.answer(text, reply_markup=premium_kb())
+
+    @dp.callback_query(F.data.startswith("buy_premium_"))
+    async def buy_premium(callback: CallbackQuery):
+        days = int(callback.data.split("_")[-1])
+        price = 50 if days == 7 else 150
+        title = f"Премиум на {days} дней"
+        await bot.send_invoice(chat_id=callback.from_user.id, title=title, description="Доступ к скрытым функциям бота знакомств", payload=f"premium_{days}", provider_token="", currency="XTR", prices=[LabeledPrice(label=title, amount=price)], start_parameter="premium")
+        await callback.answer()
+
+    @dp.pre_checkout_query()
+    async def pre_checkout(query: PreCheckoutQuery):
+        await bot.answer_pre_checkout_query(query.id, ok=True)
+
+    @dp.message(F.successful_payment)
+    async def successful_payment(m: Message):
+        payload = m.successful_payment.invoice_payload
+        days = int(payload.split("_")[-1])
+        await db.set_premium(conn, m.from_user.id, days)
+        await m.answer(f"🎉 Спасибо за покупку! Премиум активирован на {days} дней.")
+
+    @dp.message(F.text == "💖 Кто меня лайкнул")
+    async def likes_in(m: Message):
+        rows = await db.incoming_likes(conn, m.from_user.id)
+        if not rows: return await m.answer("Пока нет лайков.", reply_markup=main_menu())
+        is_prem = await db.check_premium(conn, m.from_user.id)
+        if is_prem:
+            await m.answer("Ты видишь всех, кто тебя лайкнул (Премиум активен):")
+            for p in rows[:10]: await show_profile(m, p, mode="incoming")
+        else:
+            await show_profile(m, rows[0], mode="incoming")
+            if len(rows) > 1:
+                await m.answer(f"🔒 А еще тебя лайкнули {len(rows)-1} человек. Купи Премиум, чтобы увидеть их всех!", reply_markup=premium_kb())
+
+    @dp.message(F.text == "❤️ Мои лайки")
+    async def my_likes(m: Message):
+        rows = await db.my_likes(conn, m.from_user.id)
+        if not rows: return await m.answer("Ты пока никого не лайкнул.", reply_markup=main_menu())
+        for p in rows[:3]: await show_profile(m, p, mode="mine")
+
+    @dp.callback_query(F.data == "like_back")
+    async def cb_like_back(callback: CallbackQuery):
+        uid = callback.from_user.id
+        card = active_cards.get(uid)
+        if not card or card[0] != "incoming": return await callback.answer("Ошибка.")
+        target = card[1]
+        await db.add_reaction(conn, uid, target, "like")
+        await db.add_match(conn, uid, target)
+        other = await db.get_user(conn, target)
+        me = await db.get_user(conn, uid)
+        await callback.message.answer(f"💚 Взаимно! Написать: {user_link(other)}", reply_markup=main_menu())
+        try:
+            await bot.send_message(target, f"💚 Взаимно! Написать: {user_link(me)}")
+        except: pass
+        await callback.message.delete()
+        active_cards.pop(uid, None)
+        await callback.answer()
+
+    @dp.callback_query(F.data == "skip")
+    async def cb_skip(callback: CallbackQuery):
+        uid = callback.from_user.id
+        await callback.message.delete()
+        active_cards.pop(uid, None)
+        rows = await db.incoming_likes(conn, uid)
+        if rows: await show_profile(callback.message, rows[0], mode="incoming")
+        else: await callback.message.answer("Лайки закончились.", reply_markup=main_menu())
+        await callback.answer()
+
+    @dp.message(F.text == "🎂 Фильтр возраста")
+    async def age_filter(m: Message):
+        await m.answer("Выбери диапазон возрастов для поиска:", reply_markup=age_filter_kb())
+
+    @dp.callback_query(F.data.startswith("age_"))
+    async def set_age_filter(callback: CallbackQuery):
+        val = callback.data
+        if val == "age_all":
+            mn, mx = 14, 99
+        else:
+            parts = val.replace("age_", "").split("_")
+            mn, mx = int(parts[0]), int(parts[1])
+        await conn.execute("UPDATE users SET target_age_min=?, target_age_max=? WHERE user_id=?", (mn, mx, callback.from_user.id))
+        await conn.commit()
+        await callback.message.delete()
+        await callback.message.answer(f"✅ Фильтр возраста установлен: от {mn} до {mx} лет.", reply_markup=main_menu())
+        await callback.answer()
+
+    @dp.message(F.text == "🔗 Пригласить друга")
+    async def invite_friend(m: Message):
+        bot_info = await bot.get_me()
+        ref_link = f"https://t.me/{bot_info.username}?start=ref_{m.from_user.id}"
+        await m.answer(f"Пригласи друга по этой ссылке:\n{ref_link}\n\nКогда он зарегистрируется, ты получишь +3 дня Премиума!")
+
+    @dp.message(F.text == "👤 Моя анкета")
+    async def my_profile(m: Message):
+        u = await db.get_user(conn, m.from_user.id)
+        if u: await show_profile(m, u, mode="mine")
+        else: await m.answer("Нет анкеты.", reply_markup=main_menu())
+
+    @dp.callback_query(F.data == "edit_profile")
+    async def cb_edit_profile(callback: CallbackQuery, state: FSMContext):
+        await state.clear()
+        await callback.message.answer("Что хочешь изменить в анкете?", reply_markup=edit_menu_kb())
+        await callback.answer()
+
+    @dp.callback_query(F.data == "edit_name")
+    async def cb_edit_name(callback: CallbackQuery, state: FSMContext):
+        await state.set_state(EditProfile.name)
+        await callback.message.answer("Введи новое имя:")
+        await callback.answer()
+
+    @dp.message(EditProfile.name)
+    async def save_new_name(m: Message, state: FSMContext):
+        if not m.text or len(m.text) > 30: return await m.answer("Имя от 1 до 30 символов.")
+        await conn.execute("UPDATE users SET name=? WHERE user_id=?", (m.text, m.from_user.id))
+        await conn.commit()
+        await state.clear()
+        await m.answer("✅ Имя обновлено!", reply_markup=main_menu())
+
+    @dp.callback_query(F.data == "edit_age")
+    async def cb_edit_age(callback: CallbackQuery, state: FSMContext):
+        await state.set_state(EditProfile.age)
+        await callback.message.answer(f"Введи новый возраст (от {MIN_AGE}):")
+        await callback.answer()
+
+    @dp.message(EditProfile.age)
+    async def save_new_age(m: Message, state: FSMContext):
+        if not m.text.isdigit() or int(m.text) < MIN_AGE: return await m.answer(f"Возраст от {MIN_AGE} лет.")
+        await conn.execute("UPDATE users SET age=? WHERE user_id=?", (int(m.text), m.from_user.id))
+        await conn.commit()
+        await state.clear()
+        await m.answer("✅ Возраст обновлён!", reply_markup=main_menu())
+
+    @dp.callback_query(F.data == "edit_bio")
+    async def cb_edit_bio(callback: CallbackQuery, state: FSMContext):
+        await state.set_state(EditProfile.bio)
+        await callback.message.answer("Введи новое описание (или напиши 'Пропустить'):")
+        await callback.answer()
+
+    @dp.message(EditProfile.bio)
+    async def save_new_bio(m: Message, state: FSMContext):
+        text = (m.text or "").strip()
+        bio_value = "" if text.lower() in ["пропустить", "пропустить фото"] else text
+        await conn.execute("UPDATE users SET bio=? WHERE user_id=?", (bio_value, m.from_user.id))
+        await conn.commit()
+        await state.clear()
+        await m.answer("✅ Описание обновлено!", reply_markup=main_menu())
+
+    @dp.callback_query(F.data == "edit_photo")
+    async def cb_edit_photo(callback: CallbackQuery, state: FSMContext):
+        await state.set_state(EditProfile.photo)
+        user_photos[callback.from_user.id] = []
+        await callback.message.answer("Отправь новые фото (до 3-х). Ты можешь добавить их из профиля Telegram.", reply_markup=photo_edit_kb())
+        await callback.answer()
+
+    @dp.message(EditProfile.photo, F.photo)
+    async def save_new_photo(m: Message, state: FSMContext):
+        uid = m.from_user.id
+        if uid not in user_photos: user_photos[uid] = []
+        if len(user_photos[uid]) >= 3: return await m.answer("Ты уже добавил 3 фото. Нажми «Сохранить фото».")
+        new_photo = m.photo[-1].file_id
+        if new_photo in user_photos[uid]: return await m.answer("Ты уже добавил это фото.")
+        user_photos[uid].append(new_photo)
+        if len(user_photos[uid]) < 3:
+            await m.answer(f"Фото добавлено ({len(user_photos[uid])}/3). Еще одно или нажми «Сохранить фото».", reply_markup=photo_edit_kb())
+        else:
+            await m.answer(f"Фото добавлено ({len(user_photos[uid])}/3). Нажми «Сохранить фото».", reply_markup=photo_edit_kb())
+
+    @dp.message(EditProfile.photo, F.text == "Взять из профиля Telegram")
+    async def edit_photo_from_telegram(m: Message, state: FSMContext):
+        uid = m.from_user.id
+        if uid not in user_photos: user_photos[uid] = []
+        if len(user_photos[uid]) >= 3: return await m.answer("Ты уже добавил 3 фото. Нажми «Сохранить фото».")
+        try:
+            photos = await bot.get_user_profile_photos(m.from_user.id, limit=1)
+            if not photos.total_count: return await m.answer("В твоем профиле Telegram нет фото.")
+            file_id = photos.photos[0][-1].file_id
+            if file_id in user_photos[uid]: return await m.answer("Это фото уже добавлено.")
+            user_photos[uid].append(file_id)
+            if len(user_photos[uid]) < 3:
+                await m.answer(f"Фото из профиля добавлено ({len(user_photos[uid])}/3). Еще одно или нажми «Сохранить фото».", reply_markup=photo_edit_kb())
+            else:
+                await m.answer(f"Фото из профиля добавлено ({len(user_photos[uid])}/3). Нажми «Сохранить фото».", reply_markup=photo_edit_kb())
+        except Exception:
+            await m.answer("Не удалось получить фото из профиля.")
+
+    @dp.message(EditProfile.photo, F.text == "Сохранить фото")
+    async def edit_photo_save(m: Message, state: FSMContext):
+        uid = m.from_user.id
+        if uid not in user_photos or not user_photos[uid]:
+            return await m.answer("Ты не добавил ни одного фото! Отправь фото.")
+        photos_str = ",".join(user_photos[uid])
+        await conn.execute("UPDATE users SET photos=?, video_id='' WHERE user_id=?", (photos_str, uid))
+        await conn.commit()
+        user_photos.pop(uid, None)
+        await state.clear()
+        await m.answer("✅ Фото обновлены!", reply_markup=main_menu())
+
+    @dp.message(EditProfile.photo)
+    async def edit_photo_bad(m: Message, state: FSMContext):
+        await m.answer("Пожалуйста, отправь фото или нажми кнопку.", reply_markup=photo_edit_kb())
+
+    @dp.callback_query(F.data == "cancel_edit")
+    async def cb_cancel_edit(callback: CallbackQuery, state: FSMContext):
+        await state.clear()
+        user_photos.pop(callback.from_user.id, None)
+        await callback.message.delete()
+        await callback.message.answer("Редактирование отменено.", reply_markup=main_menu())
+        await callback.answer()
+
+    @dp.message(F.text == "🌙 Сон / Поиск")
+    async def toggle(m: Message):
+        u = await db.get_user(conn, m.from_user.id)
+        new = 0 if u["is_active"] else 1
+        await conn.execute("UPDATE users SET is_active=? WHERE user_id=?", (new, m.from_user.id))
+        await conn.commit()
+        await m.answer("Анкета скрыта 🌙" if not new else "Анкета в поиске 💚", reply_markup=main_menu())
+
+    @dp.message(F.text == "ℹ️ Помощь")
+    async def help_msg(m: Message):
+        await m.answer("Помощь: лайкай анкеты. Контакты только при взаимности. В меню есть фильтр возраста, премиум и приглашение друзей.", reply_markup=main_menu())
 
     try:
         await dp.start_polling(bot)
