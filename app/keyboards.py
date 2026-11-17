@@ -28,7 +28,8 @@ def confirm_kb():
 def main_menu():
     return ReplyKeyboardMarkup(keyboard=[
         [KeyboardButton(text="🔎 Смотреть анкеты"), KeyboardButton(text="👤 Моя анкета")],
-        [KeyboardButton(text="💖 Кто меня лайкнул"), KeyboardButton(text="❤️ Мои лайки")],
+        # Кнопка "Мои лайки" удалена, "Кто меня лайкнул" теперь одна в ряду
+        [KeyboardButton(text="💖 Кто меня лайкнул")],
         [KeyboardButton(text="🎂 Фильтр возраста"), KeyboardButton(text="🔗 Пригласить друга")],
         [KeyboardButton(text="🌙 Сон / Поиск"), KeyboardButton(text="⭐ Премиум")],
         [KeyboardButton(text="ℹ️ Помощь")]
@@ -46,11 +47,6 @@ def incoming_kb(target_id: int):
     return InlineKeyboardMarkup(inline_keyboard=[
         [InlineKeyboardButton(text="💚 Ответить взаимностью", callback_data=f"like_back:{target_id}")],
         [InlineKeyboardButton(text="➡️ Пропустить", callback_data=f"skip:{target_id}")]
-    ])
-
-def liked_kb(url):
-    return InlineKeyboardMarkup(inline_keyboard=[
-        [InlineKeyboardButton(text="💬 Написать", url=url)]
     ])
 
 def edit_profile_kb():
@@ -90,11 +86,6 @@ def likes_nav_kb(offset, total, prefix):
     return InlineKeyboardMarkup(inline_keyboard=[row]) if row else None
 
 def back_to_menu_kb():
-    return InlineKeyboardMarkup(inline_keyboard=[
-        [InlineKeyboardButton(text="🏠 В меню", callback_data="go_menu")]
-    ])
-
-def my_likes_kb():
     return InlineKeyboardMarkup(inline_keyboard=[
         [InlineKeyboardButton(text="🏠 В меню", callback_data="go_menu")]
     ])
