@@ -34,6 +34,12 @@ CREATE TABLE IF NOT EXISTS reactions (
  created_at TEXT NOT NULL,
  UNIQUE(from_user_id, to_user_id)
 );
+CREATE TABLE IF NOT EXISTS skipped_likes (
+ user_id INTEGER NOT NULL,
+ target_id INTEGER NOT NULL,
+ created_at TEXT NOT NULL,
+ PRIMARY KEY(user_id, target_id)
+);
 CREATE TABLE IF NOT EXISTS reports (
  id INTEGER PRIMARY KEY AUTOINCREMENT,
  reporter_id INTEGER NOT NULL,
@@ -61,6 +67,17 @@ CREATE INDEX IF NOT EXISTS idx_reactions_from ON reactions(from_user_id);
 
 def now():
     return datetime.now(timezone.utc).isoformat()
+
+def _parse_dt(value):
+    if not value:
+        return None
+    try:
+        dt = datetime.fromisoformat(value)
+        if dt.tzinfo is None:
+            dt = dt.replace(tzinfo=timezone.utc)
+        return dt
+    except (ValueError, TypeError):
+        return None
 
 async def connect():
     Path(DB_PATH).parent.mkdir(parents=True, exist_ok=True)
@@ -118,11 +135,27 @@ async def next_profile(db, me, exclude_seen=True):
              OR (b.blocker_id = :uid AND b.blocked_id = u.user_id))'''
     if exclude_seen:
         query += " AND NOT EXISTS (SELECT 1 FROM reactions r WHERE r.from_user_id = :uid AND r.to_user_id = u.user_id)"
-    query += """ ORDER BY
-        CASE WHEN u.premium_until IS NOT NULL AND u.premium_until > datetime('now') THEN 0 ELSE 1 END,
-        RANDOM() LIMIT 1"""
+    # премиум-приоритет: выносим решение в Python, а не в SQL
+    # (в SQLite формат ISO с '+00:00' плохо сравнивается с datetime('now'))
+    query += " LIMIT 30"
     cur = await db.execute(query, params)
-    return await cur.fetchone()
+    rows = await cur.fetchall()
+    if not rows:
+        return None
+
+    now_dt = datetime.now(timezone.utc)
+    premium, regular = [], []
+    for row in rows:
+        pu = _parse_dt(row["premium_until"]) if "premium_until" in row.keys() else None
+        if pu and pu > now_dt:
+            premium.append(row)
+        else:
+            regular.append(row)
+
+    import random
+    if premium:
+        return random.choice(premium)
+    return random.choice(regular) if regular else None
 
 async def add_reaction(db, from_id, to_id, reaction):
     if from_id == to_id: return False
@@ -144,15 +177,17 @@ async def add_match(db, a, b):
     await db.commit()
 
 async def incoming_likes(db, uid, offset=0, limit=1):
-    """Кто меня лайкнул, но я ещё не ответил. Постранично."""
+    """Кто меня лайкнул, но я ещё не ответил и не пропустил. Постранично."""
     cur = await db.execute('''SELECT u.* FROM users u
       JOIN reactions r ON r.from_user_id = u.user_id
       WHERE r.to_user_id = ? AND r.reaction = 'like'
         AND u.is_active = 1 AND u.is_banned = 0
         AND NOT EXISTS (SELECT 1 FROM reactions mine
             WHERE mine.from_user_id = ? AND mine.to_user_id = u.user_id)
+        AND NOT EXISTS (SELECT 1 FROM skipped_likes s
+            WHERE s.user_id = ? AND s.target_id = u.user_id)
       ORDER BY r.created_at DESC
-      LIMIT ? OFFSET ?''', (uid, uid, limit, offset))
+      LIMIT ? OFFSET ?''', (uid, uid, uid, limit, offset))
     return await cur.fetchall()
 
 async def count_incoming_likes(db, uid):
@@ -161,9 +196,20 @@ async def count_incoming_likes(db, uid):
       WHERE r.to_user_id = ? AND r.reaction = 'like'
         AND u.is_active = 1 AND u.is_banned = 0
         AND NOT EXISTS (SELECT 1 FROM reactions mine
-            WHERE mine.from_user_id = ? AND mine.to_user_id = u.user_id)''', (uid, uid))
+            WHERE mine.from_user_id = ? AND mine.to_user_id = u.user_id)
+        AND NOT EXISTS (SELECT 1 FROM skipped_likes s
+            WHERE s.user_id = ? AND s.target_id = u.user_id)''', (uid, uid, uid))
     row = await cur.fetchone()
     return row["n"] if row else 0
+
+async def skip_incoming_like(db, uid, target_id):
+    """Запоминает пропуск, чтобы анкета не возвращалась."""
+    try:
+        await db.execute("INSERT OR IGNORE INTO skipped_likes(user_id,target_id,created_at) VALUES(?,?,?)",
+                         (uid, target_id, now()))
+        await db.commit()
+    except aiosqlite.Error:
+        pass
 
 async def my_likes(db, uid, offset=0, limit=1):
     """Кого я лайкнул — постранично."""
@@ -202,9 +248,15 @@ async def block_user(db, blocker, blocked):
     await db.commit()
 
 async def undo_reaction(db, from_id, to_id):
+    """Удаляет реакцию. Матч удаляем только если взаимной реакции больше нет."""
     await db.execute("DELETE FROM reactions WHERE from_user_id=? AND to_user_id=?", (from_id, to_id))
-    x, y = sorted((from_id, to_id))
-    await db.execute("DELETE FROM matches WHERE user1_id=? AND user2_id=?", (x, y))
+    # проверяем, осталась ли взаимная реакция
+    cur = await db.execute("SELECT 1 FROM reactions WHERE from_user_id=? AND to_user_id=? AND reaction='like'",
+                           (to_id, from_id))
+    mutual = await cur.fetchone()
+    if not mutual:
+        x, y = sorted((from_id, to_id))
+        await db.execute("DELETE FROM matches WHERE user1_id=? AND user2_id=?", (x, y))
     await db.commit()
 
 async def get_last_reaction(db, from_id):
@@ -241,13 +293,9 @@ async def add_reward(db, uid, days):
     row = await cur.fetchone()
     if not row: return
     base = datetime.now(timezone.utc)
-    if row["premium_until"]:
-        try:
-            pu = datetime.fromisoformat(row["premium_until"])
-            if pu.tzinfo is None: pu = pu.replace(tzinfo=timezone.utc)
-            if pu > base: base = pu
-        except (ValueError, TypeError):
-            pass
+    pu = _parse_dt(row["premium_until"])
+    if pu and pu > base:
+        base = pu
     new_until = (base + timedelta(days=days)).isoformat()
     await db.execute("UPDATE users SET premium_until=? WHERE user_id=?", (new_until, uid))
     await db.commit()
@@ -257,13 +305,8 @@ async def check_premium(db, uid):
     row = await cur.fetchone()
     if not row or not row["premium_until"]:
         return False
-    try:
-        premium_until = datetime.fromisoformat(row["premium_until"])
-        if premium_until.tzinfo is None:
-            premium_until = premium_until.replace(tzinfo=timezone.utc)
-        return premium_until > datetime.now(timezone.utc)
-    except (ValueError, TypeError):
-        return False
+    pu = _parse_dt(row["premium_until"])
+    return bool(pu and pu > datetime.now(timezone.utc))
 
 async def set_premium(db, uid, days):
     await add_reward(db, uid, days)
