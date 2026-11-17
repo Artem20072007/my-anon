@@ -16,20 +16,26 @@ def city_kb():
 def photo_kb():
     return ReplyKeyboardMarkup(keyboard=[
         [KeyboardButton(text="Взять из профиля Telegram")],
-        [KeyboardButton(text="Сохранить фото")]
+        [KeyboardButton(text="Сохранить фото")],
+        [KeyboardButton(text="Отмена")]
     ], resize_keyboard=True)
 
 def photo_edit_kb():
     return ReplyKeyboardMarkup(keyboard=[
         [KeyboardButton(text="Оставить текущее")],
         [KeyboardButton(text="Взять из профиля Telegram")],
-        [KeyboardButton(text="Сохранить фото")]
+        [KeyboardButton(text="Сохранить фото")],
+        [KeyboardButton(text="Отмена")]
     ], resize_keyboard=True)
 
 def confirm_kb():
-    return ReplyKeyboardMarkup(keyboard=[[KeyboardButton(text="✅ Да, все верно")], [KeyboardButton(text="✏️ Изменить анкету")]], resize_keyboard=True)
+    return ReplyKeyboardMarkup(keyboard=[
+        [KeyboardButton(text="✅ Да, все верно")], 
+        [KeyboardButton(text="✏️ Изменить анкету")],
+        [KeyboardButton(text="Отмена")]
+    ], resize_keyboard=True)
 
-# --- ГЛАВНОЕ МЕНЮ (УБРАН ПРЕМИУМ) ---
+# --- ГЛАВНОЕ МЕНЮ ---
 def main_menu():
     return ReplyKeyboardMarkup(keyboard=[
         [KeyboardButton(text="🔎 Смотреть анкеты"), KeyboardButton(text="🎲 Чат-рулетка")],
@@ -37,7 +43,7 @@ def main_menu():
         [KeyboardButton(text="🔗 Пригласить друга")]
     ], resize_keyboard=True)
 
-# --- МЕНЮ "МОЯ АНКЕТА" (Добавлена кнопка Назад, Премиум на месте) ---
+# --- МЕНЮ "МОЯ АНКЕТА" ---
 def profile_menu_kb():
     return ReplyKeyboardMarkup(keyboard=[
         [KeyboardButton(text="🔙 Вернуться назад")],
@@ -71,7 +77,7 @@ def edit_menu_kb():
         [InlineKeyboardButton(text="🖼 Изменить фото", callback_data="edit_photo")],
         [InlineKeyboardButton(text="👤 Изменить имя", callback_data="edit_name")],
         [InlineKeyboardButton(text="🎂 Изменить возраст", callback_data="edit_age")],
-        [InlineKeyboardButton(text="❌ Назад в профиль", callback_data="menu_profile")]
+        [InlineKeyboardButton(text="❌ Назад в профиль", callback_data="go_menu")]
     ])
 
 def age_filter_kb():
@@ -79,14 +85,14 @@ def age_filter_kb():
         [InlineKeyboardButton(text="14-17", callback_data="age_14_17"), InlineKeyboardButton(text="18-24", callback_data="age_18_24")],
         [InlineKeyboardButton(text="25-35", callback_data="age_25_35"), InlineKeyboardButton(text="36-99", callback_data="age_36_99")],
         [InlineKeyboardButton(text="Все возраста", callback_data="age_all")],
-        [InlineKeyboardButton(text="❌ Закрыть", callback_data="age_close")]
+        [InlineKeyboardButton(text="❌ Закрыть", callback_data="close_menu")]
     ])
 
 def premium_kb():
     return InlineKeyboardMarkup(inline_keyboard=[
         [InlineKeyboardButton(text="7 дней - 50 ⭐️", callback_data="buy_premium_7")],
         [InlineKeyboardButton(text="30 дней - 150 ⭐️", callback_data="buy_premium_30")],
-        [InlineKeyboardButton(text="❌ Закрыть", callback_data="age_close")]
+        [InlineKeyboardButton(text="❌ Закрыть", callback_data="close_menu")]
     ])
 
 def likes_nav_kb(offset, total, prefix):
@@ -117,9 +123,17 @@ def roulette_reply_kb():
 def admin_menu_kb():
     return InlineKeyboardMarkup(inline_keyboard=[
         [InlineKeyboardButton(text="📊 Статистика", callback_data="adm_stats")],
+        [InlineKeyboardButton(text="⭐ Выдать Премиум", callback_data="adm_premium")],
         [InlineKeyboardButton(text="🚨 Жалобы", callback_data="adm_reports_0")],
         [InlineKeyboardButton(text="🧹 Очистить БД", callback_data="adm_clear_db")],
         [InlineKeyboardButton(text="❌ Закрыть", callback_data="adm_close")]
+    ])
+
+def admin_premium_kb():
+    return InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text="7 дней", callback_data="adm_prem_7"), InlineKeyboardButton(text="30 дней", callback_data="adm_prem_30")],
+        [InlineKeyboardButton(text="90 дней", callback_data="adm_prem_90")],
+        [InlineKeyboardButton(text="⬅️ Назад", callback_data="adm_menu")]
     ])
 
 def admin_back_kb():
