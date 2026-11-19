@@ -1,17 +1,22 @@
-from aiogram.types import ReplyKeyboardMarkup, KeyboardButton, InlineKeyboardMarkup, InlineKeyboardButton
+from aiogram.types import (ReplyKeyboardMarkup, KeyboardButton,
+                           InlineKeyboardMarkup, InlineKeyboardButton)
 
-# --- РЕГИСТРАЦИЯ ---
+
 def gender_kb():
-    return ReplyKeyboardMarkup(keyboard=[[KeyboardButton(text="Я девушка"), KeyboardButton(text="Я парень")]], resize_keyboard=True)
+    return ReplyKeyboardMarkup(keyboard=[[
+        KeyboardButton(text="Я девушка"), KeyboardButton(text="Я парень")]], resize_keyboard=True)
+
 
 def target_kb():
     return ReplyKeyboardMarkup(keyboard=[
-        [KeyboardButton(text="С девушками"), KeyboardButton(text="С парнями")], 
+        [KeyboardButton(text="С девушками"), KeyboardButton(text="С парнями")],
         [KeyboardButton(text="Без разницы")]
     ], resize_keyboard=True)
 
+
 def city_kb():
     return ReplyKeyboardMarkup(keyboard=[[KeyboardButton(text="Чистополь")]], resize_keyboard=True)
+
 
 def photo_kb():
     return ReplyKeyboardMarkup(keyboard=[
@@ -19,6 +24,7 @@ def photo_kb():
         [KeyboardButton(text="Сохранить фото")],
         [KeyboardButton(text="Отмена")]
     ], resize_keyboard=True)
+
 
 def photo_edit_kb():
     return ReplyKeyboardMarkup(keyboard=[
@@ -28,22 +34,23 @@ def photo_edit_kb():
         [KeyboardButton(text="Отмена")]
     ], resize_keyboard=True)
 
+
 def confirm_kb():
     return ReplyKeyboardMarkup(keyboard=[
-        [KeyboardButton(text="✅ Да, все верно")], 
+        [KeyboardButton(text="✅ Да, все верно")],
         [KeyboardButton(text="✏️ Изменить анкету")],
         [KeyboardButton(text="Отмена")]
     ], resize_keyboard=True)
 
-# --- ГЛАВНОЕ МЕНЮ ---
+
 def main_menu():
     return ReplyKeyboardMarkup(keyboard=[
         [KeyboardButton(text="🔎 Смотреть анкеты"), KeyboardButton(text="🎲 Чат-рулетка")],
         [KeyboardButton(text="💗 Кто меня лайкнул"), KeyboardButton(text="👤 Моя анкета")],
-        [KeyboardButton(text="🔗 Пригласить друга")]
+        [KeyboardButton(text="⭐ Премиум"), KeyboardButton(text="🔗 Пригласить друга")]
     ], resize_keyboard=True)
 
-# --- МЕНЮ "МОЯ АНКЕТА" ---
+
 def profile_menu_kb():
     return ReplyKeyboardMarkup(keyboard=[
         [KeyboardButton(text="🔙 Вернуться назад")],
@@ -55,7 +62,7 @@ def profile_menu_kb():
         [KeyboardButton(text="👁 Предпросмотр анкеты")]
     ], resize_keyboard=True)
 
-# --- ИНЛАЙН КНОПКИ ---
+
 def feed_kb(target_id: int):
     return InlineKeyboardMarkup(inline_keyboard=[
         [InlineKeyboardButton(text="❤️", callback_data=f"like:{target_id}"),
@@ -64,11 +71,15 @@ def feed_kb(target_id: int):
          InlineKeyboardButton(text="↩️ Отменить", callback_data="undo")]
     ])
 
-def incoming_kb(target_id: int):
+
+def incoming_kb(target_id: int, offset: int = 0):
     return InlineKeyboardMarkup(inline_keyboard=[
-        [InlineKeyboardButton(text="💚 Ответить взаимностью", callback_data=f"like_back:{target_id}")],
-        [InlineKeyboardButton(text="➡️ Пропустить", callback_data=f"skip:{target_id}")]
+        [InlineKeyboardButton(text="💚 Ответить взаимностью",
+                              callback_data=f"like_back:{target_id}:{offset}")],
+        [InlineKeyboardButton(text="➡️ Пропустить",
+                              callback_data=f"skip:{target_id}:{offset}")]
     ])
+
 
 def edit_menu_kb():
     return InlineKeyboardMarkup(inline_keyboard=[
@@ -79,13 +90,17 @@ def edit_menu_kb():
         [InlineKeyboardButton(text="❌ Назад в профиль", callback_data="go_profile")]
     ])
 
+
 def age_filter_kb():
     return InlineKeyboardMarkup(inline_keyboard=[
-        [InlineKeyboardButton(text="14-17", callback_data="age_14_17"), InlineKeyboardButton(text="18-24", callback_data="age_18_24")],
-        [InlineKeyboardButton(text="25-35", callback_data="age_25_35"), InlineKeyboardButton(text="36-99", callback_data="age_36_99")],
+        [InlineKeyboardButton(text="14-17", callback_data="age_14_17"),
+         InlineKeyboardButton(text="18-24", callback_data="age_18_24")],
+        [InlineKeyboardButton(text="25-35", callback_data="age_25_35"),
+         InlineKeyboardButton(text="36-99", callback_data="age_36_99")],
         [InlineKeyboardButton(text="Все возраста", callback_data="age_all")],
         [InlineKeyboardButton(text="❌ Закрыть", callback_data="close_menu")]
     ])
+
 
 def premium_kb():
     return InlineKeyboardMarkup(inline_keyboard=[
@@ -94,18 +109,23 @@ def premium_kb():
         [InlineKeyboardButton(text="❌ Закрыть", callback_data="close_menu")]
     ])
 
+
 def likes_nav_kb(offset, total, prefix):
     row = []
     if offset > 0:
-        row.append(InlineKeyboardButton(text="⬅️ Назад", callback_data=f"{prefix}_page_{offset-1}"))
+        row.append(InlineKeyboardButton(text="⬅️ Назад",
+                                        callback_data=f"{prefix}_page_{offset-1}"))
     if offset + 1 < total:
-        row.append(InlineKeyboardButton(text="Вперёд ➡️", callback_data=f"{prefix}_page_{offset+1}"))
+        row.append(InlineKeyboardButton(text="Вперёд ➡️",
+                                        callback_data=f"{prefix}_page_{offset+1}"))
     return InlineKeyboardMarkup(inline_keyboard=[row]) if row else None
+
 
 def back_to_menu_kb():
     return InlineKeyboardMarkup(inline_keyboard=[
         [InlineKeyboardButton(text="🏠 В меню", callback_data="go_menu")]
     ])
+
 
 def roulette_found_kb():
     return InlineKeyboardMarkup(inline_keyboard=[
@@ -113,12 +133,13 @@ def roulette_found_kb():
         [InlineKeyboardButton(text="➡️ Пропустить", callback_data="roulette_skip")]
     ])
 
+
 def roulette_reply_kb():
     return ReplyKeyboardMarkup(keyboard=[
         [KeyboardButton(text="🔄 Следующий"), KeyboardButton(text="🚪 Выйти")]
     ], resize_keyboard=True)
 
-# --- АДМИНКА ---
+
 def admin_menu_kb():
     return InlineKeyboardMarkup(inline_keyboard=[
         [InlineKeyboardButton(text="📊 Статистика", callback_data="adm_stats")],
@@ -128,23 +149,28 @@ def admin_menu_kb():
         [InlineKeyboardButton(text="❌ Закрыть", callback_data="adm_close")]
     ])
 
+
 def admin_premium_kb():
     return InlineKeyboardMarkup(inline_keyboard=[
-        [InlineKeyboardButton(text="7 дней", callback_data="adm_prem_7"), InlineKeyboardButton(text="30 дней", callback_data="adm_prem_30")],
+        [InlineKeyboardButton(text="7 дней", callback_data="adm_prem_7"),
+         InlineKeyboardButton(text="30 дней", callback_data="adm_prem_30")],
         [InlineKeyboardButton(text="90 дней", callback_data="adm_prem_90")],
         [InlineKeyboardButton(text="⬅️ Назад", callback_data="adm_menu")]
     ])
+
 
 def admin_back_kb():
     return InlineKeyboardMarkup(inline_keyboard=[
         [InlineKeyboardButton(text="⬅️ Назад", callback_data="adm_menu")]
     ])
 
+
 def admin_clear_confirm1_kb():
     return InlineKeyboardMarkup(inline_keyboard=[
         [InlineKeyboardButton(text="⚠️ Я уверен, продолжить", callback_data="adm_clear_step2")],
         [InlineKeyboardButton(text="❌ Отмена", callback_data="adm_menu")]
     ])
+
 
 def admin_clear_confirm2_kb():
     return InlineKeyboardMarkup(inline_keyboard=[
