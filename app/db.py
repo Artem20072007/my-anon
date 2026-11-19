@@ -8,7 +8,11 @@ from datetime import datetime, timezone, timedelta
 DB_PATH = "data/bot.sqlite3"
 CITY = "Чистополь"
 
-SCHEMA = '''
+log = logging.getLogger(__name__)
+
+# ================= SCHEMA =================
+# Таблицы — БЕЗ closed_at в CREATE (он добавится миграцией)
+SCHEMA_TABLES = '''
 CREATE TABLE IF NOT EXISTS users (
  user_id INTEGER PRIMARY KEY,
  username TEXT,
@@ -73,13 +77,16 @@ CREATE TABLE IF NOT EXISTS roulette_rooms (
     room_id INTEGER PRIMARY KEY AUTOINCREMENT,
     user1_id INTEGER NOT NULL,
     user2_id INTEGER NOT NULL,
-    created_at TEXT NOT NULL,
-    closed_at TEXT DEFAULT NULL
+    created_at TEXT NOT NULL
 );
 CREATE TABLE IF NOT EXISTS roulette_queue (
     user_id INTEGER PRIMARY KEY,
     joined_at TEXT NOT NULL
 );
+'''
+
+# Индексы — создаются ТОЛЬКО после миграций
+SCHEMA_INDEXES = '''
 CREATE INDEX IF NOT EXISTS idx_users_feed ON users(is_active, is_banned, city, age, gender);
 CREATE INDEX IF NOT EXISTS idx_reactions_to ON reactions(to_user_id, reaction);
 CREATE INDEX IF NOT EXISTS idx_reactions_from ON reactions(from_user_id);
@@ -88,9 +95,15 @@ CREATE INDEX IF NOT EXISTS idx_views_target ON views(target_id);
 CREATE INDEX IF NOT EXISTS idx_roulette_rooms_open ON roulette_rooms(closed_at, user1_id, user2_id);
 '''
 
-_DB_WRITE_LOCK = asyncio.Lock()
+MIGRATIONS = [
+    "ALTER TABLE users ADD COLUMN premium_until TEXT DEFAULT NULL",
+    "ALTER TABLE users ADD COLUMN is_verified INTEGER DEFAULT 0",
+    "ALTER TABLE users ADD COLUMN video_id TEXT DEFAULT ''",
+    "ALTER TABLE users ADD COLUMN referral_id INTEGER",
+    "ALTER TABLE roulette_rooms ADD COLUMN closed_at TEXT DEFAULT NULL",
+]
 
-log = logging.getLogger(__name__)
+_DB_WRITE_LOCK = asyncio.Lock()
 
 
 def now():
@@ -131,20 +144,21 @@ async def connect():
     await db.execute("PRAGMA foreign_keys=ON")
     await db.execute("PRAGMA journal_mode=WAL")
     await db.execute("PRAGMA busy_timeout=5000")
-    await db.executescript(SCHEMA)
-    # миграции
-    for stmt in [
-        "ALTER TABLE users ADD COLUMN premium_until TEXT DEFAULT NULL",
-        "ALTER TABLE users ADD COLUMN is_verified INTEGER DEFAULT 0",
-        "ALTER TABLE users ADD COLUMN video_id TEXT DEFAULT ''",
-        "ALTER TABLE users ADD COLUMN referral_id INTEGER",
-        "ALTER TABLE roulette_rooms ADD COLUMN closed_at TEXT DEFAULT NULL",
-    ]:
+
+    # 1) таблицы
+    await db.executescript(SCHEMA_TABLES)
+
+    # 2) миграции (ADD COLUMN)
+    for stmt in MIGRATIONS:
         try:
             await db.execute(stmt)
         except aiosqlite.OperationalError:
             pass
-    # чистим NULL-ы
+
+    # 3) индексы — только после миграций
+    await db.executescript(SCHEMA_INDEXES)
+
+    # 4) чистка NULL
     for q in [
         "UPDATE users SET target_age_min=14 WHERE target_age_min IS NULL",
         "UPDATE users SET target_age_max=99 WHERE target_age_max IS NULL",
@@ -155,7 +169,8 @@ async def connect():
         "UPDATE users SET bio='' WHERE bio IS NULL",
     ]:
         await db.execute(q)
-    # закрываем зависшие комнаты старше 1 часа
+
+    # 5) закрываем зависшие комнаты старше 1 часа
     cutoff = (datetime.now(timezone.utc) - timedelta(hours=1)).isoformat()
     await db.execute(
         "UPDATE roulette_rooms SET closed_at=? WHERE closed_at IS NULL AND created_at < ?",
@@ -185,11 +200,11 @@ async def save_user(db, data):
     target_gender = data.get("target_gender")
 
     if not user_id or not name or not isinstance(age, int) or not (14 <= age <= 99):
-        raise ValueError(f"save_user: bad payload")
+        raise ValueError("save_user: bad payload")
     if gender not in ("m", "f"):
-        raise ValueError(f"save_user: bad gender")
+        raise ValueError("save_user: bad gender")
     if target_gender not in ("m", "f", "all"):
-        raise ValueError(f"save_user: bad target_gender")
+        raise ValueError("save_user: bad target_gender")
 
     photos_str = ",".join(data.get("photos") or [])
     old = await get_user(db, user_id)
@@ -542,7 +557,6 @@ ROULETTE_COOLDOWN_MIN = 30
 async def roulette_join_queue(db, uid):
     async with _DB_WRITE_LOCK:
         try:
-            # закрываем зависшие комнаты этого юзера
             await _exec(db,
                 "UPDATE roulette_rooms SET closed_at=? WHERE closed_at IS NULL AND (user1_id=? OR user2_id=?)",
                 (now(), uid, uid))
@@ -550,7 +564,6 @@ async def roulette_join_queue(db, uid):
 
             cutoff = (datetime.now(timezone.utc) - timedelta(minutes=ROULETTE_COOLDOWN_MIN)).isoformat()
 
-            # ищем партнёра: активен, не забанен, не в открытой комнате, не был с нами в комнате за последние N минут
             cur = await _exec(db, """SELECT q.user_id FROM roulette_queue q
                 JOIN users u ON u.user_id = q.user_id
                 WHERE q.user_id != ? AND u.is_active=1 AND u.is_banned=0
