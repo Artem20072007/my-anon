@@ -10,6 +10,7 @@ from aiogram.filters import CommandStart, Command, StateFilter
 from aiogram.types import (Message, CallbackQuery, InputMediaPhoto, LabeledPrice,
                            PreCheckoutQuery, ReplyKeyboardMarkup, KeyboardButton,
                            ReplyKeyboardRemove, InlineKeyboardMarkup, InlineKeyboardButton)
+from aiogram.exceptions import TelegramBadRequest
 from aiogram.fsm.context import FSMContext
 from aiogram.fsm.storage.memory import MemoryStorage
 from app import db
@@ -29,11 +30,9 @@ CITY = "Чистополь"
 conn = None
 STOP_WORDS = ["член", "секс", "анал", "интим", "пошлый", "ебаться"]
 
-# per-user буферы фото с TTL
-user_photos = {}     # uid -> {"photos": [...], "ts": monotonic}
+user_photos = {}
 PHOTO_TTL = 3600
 
-# анти-дабл-клик: (uid, action, target) -> monotonic
 _action_lock = {}
 ACTION_COOLDOWN = 1.0
 
@@ -82,6 +81,32 @@ async def safe_answer(callback: CallbackQuery, text: str = None, show_alert: boo
         await callback.answer(text=text, show_alert=show_alert)
     except Exception:
         pass
+
+
+async def safe_send_photo(message: Message, file_id: str, caption: str, reply_markup=None) -> bool:
+    """Отправка фото с обработкой FILE_REFERENCE_EXPIRED."""
+    try:
+        await message.answer_photo(file_id, caption=caption, reply_markup=reply_markup)
+        return True
+    except TelegramBadRequest as e:
+        log.warning(f"answer_photo failed: {e}")
+        return False
+    except Exception as e:
+        log.exception(f"answer_photo unexpected: {e}")
+        return False
+
+
+async def safe_send_video(message: Message, file_id: str, caption: str, reply_markup=None) -> bool:
+    """Отправка видео с обработкой FILE_REFERENCE_EXPIRED."""
+    try:
+        await message.answer_video(file_id, caption=caption, reply_markup=reply_markup)
+        return True
+    except TelegramBadRequest as e:
+        log.warning(f"answer_video failed: {e}")
+        return False
+    except Exception as e:
+        log.exception(f"answer_video unexpected: {e}")
+        return False
 
 
 def parse_int(value, default=None):
@@ -165,15 +190,27 @@ async def show_profile(message: Message, p, mode="feed", offset: int = 0, extra_
 
     if photos:
         if mode in ("feed", "incoming", "match") or len(photos) == 1:
-            await message.answer_photo(photos[0], caption=caption, reply_markup=markup)
+            sent = await safe_send_photo(message, photos[0], caption, markup)
+            if not sent:
+                await message.answer(caption + "\n\n⚠️ Фото недоступно", reply_markup=markup)
         else:
-            media = [InputMediaPhoto(media=ph, caption=caption if i == 0 else None)
-                     for i, ph in enumerate(photos)]
-            await message.answer_media_group(media)
-            if markup:
-                await message.answer("👆 Твоя анкета.", reply_markup=markup)
+            # для своей анкеты — медиагруппа, тоже безопасно
+            try:
+                media = [InputMediaPhoto(media=ph, caption=caption if i == 0 else None)
+                         for i, ph in enumerate(photos)]
+                await message.answer_media_group(media)
+                if markup:
+                    await message.answer("👆 Твоя анкета.", reply_markup=markup)
+            except TelegramBadRequest as e:
+                log.warning(f"media_group failed: {e}")
+                # fallback — первое фото или текст
+                sent = await safe_send_photo(message, photos[0], caption, markup)
+                if not sent:
+                    await message.answer(caption + "\n\n⚠️ Фото недоступно", reply_markup=markup)
     elif "video_id" in p.keys() and p["video_id"]:
-        await message.answer_video(p["video_id"], caption=caption, reply_markup=markup)
+        sent = await safe_send_video(message, p["video_id"], caption, markup)
+        if not sent:
+            await message.answer(caption + "\n\n⚠️ Видео недоступно", reply_markup=markup)
     else:
         await message.answer(caption, reply_markup=markup)
 
@@ -430,10 +467,10 @@ async def main():
             await m.answer(f"Фото ({len(photos)}/3). Ещё или «Сохранить».", reply_markup=kb)
         else:
             await state.set_state(Registration.confirm)
-            await m.answer_photo(
-                photo=photos[0],
-                caption=f"Проверь: {d.get('name')}, {d.get('age')}\n📍 {d.get('city')}\n📝 {d.get('bio') or 'Нет'}",
-                reply_markup=confirm_kb())
+            await safe_send_photo(
+                m, photos[0],
+                f"Проверь: {d.get('name')}, {d.get('age')}\n📍 {d.get('city')}\n📝 {d.get('bio') or 'Нет'}",
+                confirm_kb())
 
     @dp.message(Registration.photo, F.video)
     async def reg_video(m: Message, state: FSMContext):
@@ -443,10 +480,10 @@ async def main():
         _photos_clear(m.from_user.id)
         await state.set_state(Registration.confirm)
         d = await state.get_data()
-        await m.answer_video(
-            video=m.video.file_id,
-            caption=f"Проверь: {d.get('name')}, {d.get('age')}\n📍 {d.get('city')}\n📝 {d.get('bio') or 'Нет'}",
-            reply_markup=confirm_kb())
+        await safe_send_video(
+            m, m.video.file_id,
+            f"Проверь: {d.get('name')}, {d.get('age')}\n📍 {d.get('city')}\n📝 {d.get('bio') or 'Нет'}",
+            confirm_kb())
 
     @dp.message(Registration.photo, F.text == "Сохранить фото")
     async def reg_photo_save(m: Message, state: FSMContext):
@@ -456,10 +493,10 @@ async def main():
         await state.update_data(photos=photos, video_id="")
         await state.set_state(Registration.confirm)
         d = await state.get_data()
-        await m.answer_photo(
-            photo=photos[0],
-            caption=f"Проверь: {d.get('name')}, {d.get('age')}\n📍 {d.get('city')}\n📝 {d.get('bio') or 'Нет'}",
-            reply_markup=confirm_kb())
+        await safe_send_photo(
+            m, photos[0],
+            f"Проверь: {d.get('name')}, {d.get('age')}\n📍 {d.get('city')}\n📝 {d.get('bio') or 'Нет'}",
+            confirm_kb())
 
     @dp.message(Registration.photo, F.text == "Взять из профиля Telegram")
     async def reg_photo_telegram(m: Message, state: FSMContext):
@@ -487,10 +524,10 @@ async def main():
                 await m.answer(f"Добавлено ({len(photos)}/3).", reply_markup=kb)
             else:
                 await state.set_state(Registration.confirm)
-                await m.answer_photo(
-                    photo=photos[0],
-                    caption=f"Проверь: {d.get('name')}, {d.get('age')}",
-                    reply_markup=confirm_kb())
+                await safe_send_photo(
+                    m, photos[0],
+                    f"Проверь: {d.get('name')}, {d.get('age')}",
+                    confirm_kb())
         except Exception:
             log.exception("get_user_profile_photos")
             await m.answer("Ошибка получения фото.")
@@ -673,9 +710,13 @@ async def main():
         caption = "👁 Предпросмотр:\n\n" + profile_caption(u, stats)
         photos = u["photos"].split(",") if u["photos"] else []
         if photos:
-            await m.answer_photo(photos[0], caption=caption, reply_markup=back_to_menu_kb())
+            sent = await safe_send_photo(m, photos[0], caption, back_to_menu_kb())
+            if not sent:
+                await m.answer(caption + "\n\n⚠️ Фото недоступно", reply_markup=back_to_menu_kb())
         elif u["video_id"]:
-            await m.answer_video(u["video_id"], caption=caption, reply_markup=back_to_menu_kb())
+            sent = await safe_send_video(m, u["video_id"], caption, back_to_menu_kb())
+            if not sent:
+                await m.answer(caption + "\n\n⚠️ Видео недоступно", reply_markup=back_to_menu_kb())
         else:
             await m.answer(caption, reply_markup=back_to_menu_kb())
 
@@ -733,7 +774,7 @@ async def main():
         if target == uid:
             return await safe_answer(callback, "Себя нельзя.", show_alert=True)
         if not _try_action(uid, action, target):
-            return await safe_answer(callback)  # дабл-клик, тихо глотаем
+            return await safe_answer(callback)
 
         try:
             target_user = await db.get_user(conn, target)
@@ -1132,8 +1173,6 @@ async def main():
         await safe_delete(callback.message)
         if not ok:
             await safe_answer(callback, "Ошибка, попробуй ещё раз.", show_alert=True)
-            # перерисовываем тот же offset, но target мог не записаться — 
-            # принудительно сдвигаем offset на следующий, чтобы не показать того же
             await render_incoming(callback.message, uid, offset + 1)
             return
 
